@@ -9,3 +9,10 @@
 
 # Visual Studio cache
 .vs/
+*.ipch
+*.vc.db
+*.pdb
+*.obj
+*.exe
+*.dll
+*.log

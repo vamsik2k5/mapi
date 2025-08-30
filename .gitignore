@@ -1,0 +1,11 @@
+# Ignore build files
+*.vc.db
+*.ipch
+*.obj
+*.exe
+*.pdb
+*.dll
+*.log
+
+# Visual Studio cache
+.vs/

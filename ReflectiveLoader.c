@@ -16,12 +16,12 @@ ULONG_PTR caller(void)
 extern "C" {
 #endif
 
-DWORD WINAPI MyMainThread(LPVOID lpParam)
+extern DWORD WINAPI MyMainThread(LPVOID lpParam);
 
 #ifdef REFLECTIVEDLLINJECTION_VIA_LOADREMOTELIBRARYR
-__declspec(dllexport) ULONG_PTR WINAPI ReflectiveLoader(LPVOID lpParameter)
+ULONG_PTR WINAPI ReflectiveLoader(LPVOID lpParameter)
 #else
-__declspec(dllexport) ULONG_PTR WINAPI ReflectiveLoader(void)
+ULONG_PTR WINAPI ReflectiveLoader(void)
 #endif
 {
 	// the functions we need

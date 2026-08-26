@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Raw malware samples - never publish live malware to a public repo.
+# See reports/ for the analysis write-ups instead; regenerate
+# data/binaries.json locally with tools/extract_features.py if needed.
+samples/*.exe
+samples/*.zip
+samples/*.dll
+
+# Sysmon binaries - large, Microsoft-signed third-party redistributables,
+# easy to re-download (see README for the exact command). Config stays.
+tools/sysmon/*.exe
+tools/sysmon/Eula.txt
+
+# Editor/OS cruft
+.vscode/
+Thumbs.db

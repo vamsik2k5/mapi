@@ -17,6 +17,7 @@ worse) when run against real system activity. Those are called out inline.
 - [How it works](#how-it-works)
 - [Architecture](#architecture)
 - [What each detector actually catches](#what-each-detector-actually-catches)
+- [Threat intel sync (MalwareBazaar)](#threat-intel-sync-malwarebazaar)
 - [Safety model](#safety-model-read-this-before-running-it)
 - [Setup](#setup)
 - [Running it](#running-it)
@@ -108,6 +109,13 @@ both keep running.
 | LSASS dump IAT pattern (`MiniDumpWriteDump`+`OpenProcess`) | `static_scanner.py` | T1003.001 |
 | Vendor-impersonation (unsigned + claims Microsoft/Google/etc.) | `static_scanner.py` | T1036 masquerading |
 | Metamorphic clone detection | `static_scanner.py` | Polymorphic malware family clustering |
+| AMSI bypass pattern (`AmsiScanBuffer`+`VirtualProtect`) | `static_scanner.py` | T1562.001 |
+| ETW patch/evasion pattern (`EtwEventWrite`+`VirtualProtect`) | `static_scanner.py` | T1562.006 |
+| SeDebugPrivilege-style acquisition precursor | `static_scanner.py` | T1134 |
+| Direct native (`Nt*`/`Zw*`) syscalls + injection APIs | `static_scanner.py` | T1055 (usermode-hook evasion) |
+| Bulk file enumeration + crypto API | `static_scanner.py` | T1486 (static ransomware precursor) |
+| Crypto-clipper / webhook / paste-site / IP-literal C2 strings | `static_scanner.py` | T1027, T1102, T1071 |
+| Imphash match against known-family intel | `static_scanner.py` | Family clustering (see [Threat intel sync](#threat-intel-sync-malwarebazaar)) |
 | Execution from staging dirs (`Temp`, `Public`) | `heuristic_engine.py` | T1036 / T1105 |
 | Defender-tamper command lines | `heuristic_engine.py` | T1562.001 |
 | Obfuscated/download-execute PowerShell | `heuristic_engine.py` | T1059.001, T1027 |
@@ -122,6 +130,59 @@ Matching Sigma rules for the Sysmon-driven detections live in
 [`rules/sigma.yml`](rules/sigma.yml); YARA rules for the static/family
 detections live in [`rules/static.yar`](rules/static.yar) and
 [`rules/family_signatures.yar`](rules/family_signatures.yar).
+
+## Threat intel sync (MalwareBazaar)
+
+[`tools/threat_intel_sync.py`](tools/threat_intel_sync.py) pulls **metadata
+only** — hashes, imphash, family/tag, file type, first-seen date — from
+[MalwareBazaar](https://bazaar.abuse.ch)'s API and writes it into
+`data/known_imphashes.json`, which `static_scanner.py` checks every sample's
+imphash against.
+
+**This project never downloads actual malware binaries from MalwareBazaar,
+by design.** MalwareBazaar's API has a `get_file` query that returns raw
+sample content — that endpoint is not implemented anywhere in this repo.
+Only `get_recent`, `get_siginfo`, and `get_taginfo` are used, which return
+JSON classification data about samples abuse.ch has already analyzed, not
+sample content. If you want raw samples for your own analysis, get them
+yourself in an isolated VM — see [`samples/README.md`](samples/README.md).
+
+**Why imphash instead of raw hashes:** imphash is a hash of a PE's ordered
+import table. Two samples that share an imphash almost always share the
+same compiler-emitted binary lineage (same builder/family) even after the
+file bytes themselves are repacked or the hash otherwise changes — so this
+catches variants this project has never seen a literal sample of, which a
+SHA-256 blocklist alone never could.
+
+### Setup
+
+1. Get a free `Auth-Key` at [auth.abuse.ch](https://auth.abuse.ch/)
+   (personal account, enable API access under MalwareBazaar). This project
+   can't do this step for you — it's account creation on a third-party
+   service.
+2. Set it as an environment variable. **Never hardcode it, never commit
+   it** — `.gitignore` already excludes `.env` and `*.key` as a backstop:
+   ```powershell
+   $env:MALWAREBAZAAR_AUTH_KEY = "your-key-here"
+   ```
+
+### Usage
+
+```powershell
+cd tools
+# Pull the 100 most recent samples abuse.ch has classified
+..\.venv\Scripts\python.exe threat_intel_sync.py --recent 100
+
+# Pull samples for specific families (repeatable flag)
+..\.venv\Scripts\python.exe threat_intel_sync.py --family Quasar --family AsyncRAT
+
+# Pull samples by tag
+..\.venv\Scripts\python.exe threat_intel_sync.py --tag NSIS
+```
+
+Each run merges into the existing `data/known_imphashes.json` rather than
+overwriting it, so you can build up coverage incrementally across multiple
+family/tag queries over time.
 
 ## Safety model (read this before running it)
 
@@ -321,13 +382,15 @@ mal_project/
 │   └── module_inspector.py Active live-process module sweep
 ├── tools/
 │   ├── extract_features.py Offline PE feature extractor (pefile-based, never executes samples)
+│   ├── threat_intel_sync.py MalwareBazaar metadata sync (imphash/family intel, never downloads samples)
 │   └── sysmon/              Sysmon config.xml (binaries gitignored - see Setup)
 ├── rules/
 │   ├── static.yar            Structural YARA rules (RWX, entropy, LSASS-dump IAT, impersonation)
 │   ├── family_signatures.yar YARA rules for specific known samples analyzed in reports/
 │   └── sigma.yml              Sigma rules mirroring every Sysmon-driven heuristic
 ├── data/
-│   └── binaries.json        Extracted PE features (output of extract_features.py)
+│   ├── binaries.json         Extracted PE features (output of extract_features.py)
+│   └── known_imphashes.json  Family/imphash intel (output of threat_intel_sync.py; absent until you run it)
 ├── samples/                 Raw samples go here locally - not committed (see samples/README.md)
 ├── reports/                 Manual malware analysis write-ups for specific samples
 └── scripts/

@@ -18,3 +18,8 @@ tools/sysmon/Eula.txt
 # Editor/OS cruft
 .vscode/
 Thumbs.db
+
+# Never commit API keys/tokens
+.env
+*.key
+tools/.mb_auth_key

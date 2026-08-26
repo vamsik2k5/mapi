@@ -6,7 +6,7 @@
             "md5": "cca201c4bd7f2e94d29103e42b2a3efe",
             "sha256": "ceae7ff9fd975917d2bcc75afce181db54d494e9c18370dc24c295544adc39e7"
         },
-        "extraction_timestamp": "2026-08-25T16:03:55.594724Z",
+        "extraction_timestamp": "2026-08-26T15:09:31.633634Z",
         "pe_metadata": {
             "machine_type": "0x8664",
             "number_of_sections": 3,
@@ -72,6 +72,8 @@
         },
         "exports": [],
         "errors": [],
+        "string_indicators": {},
+        "imphash": "3be2f8b2813fd98a632ec5ec5c8eeb35",
         "has_authenticode_signature": false,
         "version_info": {}
     },
@@ -82,7 +84,7 @@
             "md5": "ef1edb9832de57929991acc26e911885",
             "sha256": "87df7b1e0dec65d122ce8146d9564308c99cafd7ccd9c9cfbae57fa220f03027"
         },
-        "extraction_timestamp": "2026-08-25T16:03:55.650560Z",
+        "extraction_timestamp": "2026-08-26T15:09:31.942670Z",
         "pe_metadata": {
             "machine_type": "0x8664",
             "number_of_sections": 9,
@@ -364,6 +366,8 @@
         },
         "exports": [],
         "errors": [],
+        "string_indicators": {},
+        "imphash": "638412584a7ea8255b78ac3723315e6c",
         "has_authenticode_signature": false,
         "version_info": {}
     },
@@ -374,7 +378,7 @@
             "md5": "6b7cb4a856cdd33b9931400b78eab845",
             "sha256": "60d2d46eddec20121d0a4b2a9355534955021944f5a243ef5327f58c86947af3"
         },
-        "extraction_timestamp": "2026-08-25T16:03:55.980326Z",
+        "extraction_timestamp": "2026-08-26T15:09:32.449589Z",
         "pe_metadata": {
             "machine_type": "0x8664",
             "number_of_sections": 9,
@@ -659,6 +663,8 @@
         },
         "exports": [],
         "errors": [],
+        "string_indicators": {},
+        "imphash": "75cba00d2307c8102f72a8e7315e539b",
         "has_authenticode_signature": false,
         "version_info": {}
     },
@@ -669,7 +675,7 @@
             "md5": "a83b429b67d8eefaa05a437601658929",
             "sha256": "62766be87e8ffc710e198ef5e84bd9239d83fd2588f075e00ff9e16e9ccb409b"
         },
-        "extraction_timestamp": "2026-08-25T16:03:56.051402Z",
+        "extraction_timestamp": "2026-08-26T15:09:32.617741Z",
         "pe_metadata": {
             "machine_type": "0x8664",
             "number_of_sections": 9,
@@ -951,6 +957,8 @@
         },
         "exports": [],
         "errors": [],
+        "string_indicators": {},
+        "imphash": "638412584a7ea8255b78ac3723315e6c",
         "has_authenticode_signature": false,
         "version_info": {}
     },
@@ -961,7 +969,7 @@
             "md5": "adeafb36a22ed06c8f9d3890bb352f28",
             "sha256": "51a4a7d817fd0c5290291a62265f98544037f030329502f75133c4ac277839ad"
         },
-        "extraction_timestamp": "2026-08-25T16:03:56.406152Z",
+        "extraction_timestamp": "2026-08-26T15:09:33.115283Z",
         "pe_metadata": {
             "machine_type": "0x8664",
             "number_of_sections": 15,
@@ -1171,6 +1179,8 @@
         },
         "exports": [],
         "errors": [],
+        "string_indicators": {},
+        "imphash": "2202b776aa9d4d1d4b6b940b728f2923",
         "has_authenticode_signature": false,
         "version_info": {}
     }

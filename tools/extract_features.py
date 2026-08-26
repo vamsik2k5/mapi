@@ -1,9 +1,42 @@
 import os
+import re
 import json
 import math
 import hashlib
 import pefile
 from datetime import datetime
+
+# Curated indicator patterns for the string-scan pass below. Each is a
+# well-documented, generic technique fingerprint (not tied to any one
+# family) safe to hardcode as plain-text regex/substrings - unlike file
+# hashes or imphashes, these don't risk being a mis-remembered fact, since
+# they're structural patterns (a BTC address shape, a webhook URL prefix),
+# not a specific claimed identity.
+BTC_ADDRESS_RE = re.compile(rb'\b(bc1[a-z0-9]{25,90}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b')
+ETH_ADDRESS_RE = re.compile(rb'\b0x[a-fA-F0-9]{40}\b')
+STRING_MARKERS = {
+    'discord_webhook': rb'discord(?:app)?\.com/api/webhooks',
+    'telegram_bot_api': rb'api\.telegram\.org/bot',
+    'pastebin_raw': rb'pastebin\.com/raw/',
+    'ip_literal_http_c2': rb'https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}',
+}
+
+
+def scan_string_indicators(data):
+    """Cheap byte-level regex scan for generic malware technique markers
+    (crypto-clipper wallet patterns, webhook/bot C2 channels, raw-paste
+    staged payloads, hardcoded-IP C2 URLs) - booleans only, not a full
+    string dump, so this stays small and doesn't leak file content into
+    binaries.json beyond what's needed to explain a flag."""
+    found = {}
+    if BTC_ADDRESS_RE.search(data):
+        found['btc_address_pattern'] = True
+    if ETH_ADDRESS_RE.search(data):
+        found['eth_address_pattern'] = True
+    for name, pattern in STRING_MARKERS.items():
+        if re.search(pattern, data, re.IGNORECASE):
+            found[name] = True
+    return found
 
 def calculate_entropy(data):
     """Calculates the Shannon entropy of a byte sequence."""
@@ -51,9 +84,29 @@ def extract_pe_features(file_path):
     }
 
     try:
+        with open(file_path, 'rb') as f:
+            raw_bytes = f.read()
+        feature_set["string_indicators"] = scan_string_indicators(raw_bytes)
+    except Exception as e:
+        feature_set["errors"].append(f"String-scan failed: {str(e)}")
+        feature_set["string_indicators"] = {}
+
+    try:
         # Load the PE file, fast_load=True defers parsing directories until needed
         pe = pefile.PE(file_path, fast_load=True)
         pe.parse_data_directories()
+
+        # imphash: a hash of the ordered (dll, function) import list. Two
+        # samples with identical imphash almost always share a compiler-
+        # emitted binary lineage (same builder/family) even after the
+        # bytes themselves are repacked - a standard family-clustering
+        # signal, and the key that a MalwareBazaar imphash lookup (see
+        # data/known_imphashes.json, populated by tools/threat_intel_sync.py)
+        # matches against.
+        try:
+            feature_set["imphash"] = pe.get_imphash()
+        except Exception:
+            feature_set["imphash"] = None
 
         # 1. Base PE Metadata
         feature_set["pe_metadata"] = {

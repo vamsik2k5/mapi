@@ -4,6 +4,8 @@ from static_scanner import StaticScanner
 from telemetry_monitor import start_monitor
 from heuristic_engine import HeuristicEngine
 from module_inspector import ModuleInspector
+from rule_engine import RuleEngine
+from detection_config import load_config
 
 MODULE_SWEEP_INTERVAL_SECONDS = 30
 
@@ -12,13 +14,18 @@ def main():
     print("      Windows Defensive Agent (EDR Prototype)        ")
     print("=====================================================")
 
-    # 1. Initialize Heuristic Engine
-    engine = HeuristicEngine()
-    
+    # 1. Initialize Heuristic Engine - the same additive YAML rule pack
+    # (rules/custom/*.yml) and config-driven tunables (config/detection.yml)
+    # the web dashboard uses, so this CLI entrypoint and web_server.py never
+    # quietly diverge in what they detect.
+    rules = RuleEngine()
+    config = load_config()
+    engine = HeuristicEngine(rule_engine=rules, config=config)
+
     # 2. Static Ingress & PE Scanner
     binaries_path = "../data/binaries.json"  # Path to pre-extracted features
     logging.info(f"[*] Starting Static Ingress Scanner on {binaries_path}...")
-    scanner = StaticScanner(engine, binaries_path)
+    scanner = StaticScanner(engine, binaries_path, rule_engine=rules)
     scanner.scan()
     logging.info("[+] Static Scan Complete.")
     

@@ -206,7 +206,7 @@ function renderExplorer() {
 
   const rows = lastActivity.filter((e) => {
     if (!filter) return true;
-    return [e.image, e.parent_image, e.command_line].some((f) => (f || "").toLowerCase().includes(filter));
+    return [e.image, e.parent_image, e.command_line, e.lineage].some((f) => (f || "").toLowerCase().includes(filter));
   });
 
   clear(body);
@@ -219,8 +219,28 @@ function renderExplorer() {
     tr.appendChild(el("td", { text: e.time }));
     tr.appendChild(el("td", { text: e.pid }));
     tr.appendChild(el("td", { text: e.image || "" }));
-    tr.appendChild(el("td", { text: e.parent_image || "" }));
+    tr.appendChild(el("td", { text: e.lineage || "" }));
     tr.appendChild(el("td", { text: e.command_line || "" }));
+    body.appendChild(tr);
+  }
+}
+
+// ---- rules tab (additive YAML rule pack) ---------------------------------
+function renderRules(rows) {
+  const body = document.getElementById("rulesBody");
+  clear(body);
+  if (rows.length === 0) {
+    body.appendChild(emptyRow(6, "No custom rules loaded - add a YAML file under rules/custom/."));
+    return;
+  }
+  for (const r of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", { text: r.name }));
+    tr.appendChild(el("td", { text: r.technique || "" }));
+    tr.appendChild(el("td", { text: r.applies_to }));
+    tr.appendChild(el("td", { text: r.score }));
+    tr.appendChild(el("td", { text: r.enabled ? "Enabled" : "Disabled", className: r.enabled ? "sev-INFO" : "sev-WARNING" }));
+    tr.appendChild(el("td", { text: r.hit_count }));
     body.appendChild(tr);
   }
 }
@@ -240,7 +260,7 @@ function initTabs() {
 // ---- polling loop -----------------------------------------------------
 async function poll() {
   try {
-    const [summary, alerts, timeseries, categories, processes, staticRows, activity] = await Promise.all([
+    const [summary, alerts, timeseries, categories, processes, staticRows, activity, rules] = await Promise.all([
       getJSON("/api/summary"),
       getJSON("/api/alerts?limit=200"),
       getJSON("/api/alerts/timeseries"),
@@ -248,6 +268,7 @@ async function poll() {
       getJSON("/api/processes"),
       getJSON("/api/static"),
       getJSON("/api/process-activity?limit=300"),
+      getJSON("/api/rules"),
     ]);
     renderSummary(summary);
     lastAlerts = alerts;
@@ -259,6 +280,7 @@ async function poll() {
     renderStatic(staticRows);
     lastActivity = activity;
     renderExplorer();
+    renderRules(rules);
   } catch (e) {
     console.error("poll failed", e);
   }

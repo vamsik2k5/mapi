@@ -41,10 +41,15 @@ def _load_known_imphashes(path):
 
 
 class StaticScanner:
-    def __init__(self, engine, binaries_path, known_imphashes_path=KNOWN_IMPHASHES_PATH):
+    def __init__(self, engine, binaries_path, known_imphashes_path=KNOWN_IMPHASHES_PATH, rule_engine=None):
         self.engine = engine
         self.binaries_path = binaries_path
         self.known_imphashes = _load_known_imphashes(known_imphashes_path)
+        # Optional additive YAML rule pack (src/rule_engine.py), evaluated
+        # after every hardcoded check below via evaluate_static() - hits
+        # are routed through self.engine.add_static_score() same as every
+        # hardcoded finding, so nothing about scoring/logging is duplicated.
+        self.rule_engine = rule_engine
 
     def scan(self):
         try:
@@ -177,6 +182,22 @@ class StaticScanner:
                         f"{filename}: Unsigned binary claims to be published by '{version_info.get('CompanyName')}' "
                         f"(ProductName='{version_info.get('ProductName', '?')}') - brand impersonation"
                     )
+
+            if self.rule_engine:
+                feature_dict = {
+                    'filename': filename,
+                    'hash': file_hash,
+                    'imports_flat': import_flat,
+                    'max_entropy': max((sec.get('entropy', 0) for sec in sections), default=0),
+                    'has_rwx_section': any(sec.get('is_rwx') for sec in sections),
+                    'string_indicators': [k for k, v in (entry.get('string_indicators') or {}).items() if v],
+                    'imphash': entry.get('imphash'),
+                    'company_name': version_info.get('CompanyName'),
+                    'product_name': version_info.get('ProductName'),
+                    'has_signature': has_signature,
+                }
+                for rule, message in self.rule_engine.evaluate_static(feature_dict):
+                    self.engine.add_static_score(file_hash, rule.score, f"{filename}: [RULE:{rule.id}] {message}")
 
             # Calculate Structural Hash
             struct_str = "|".join(structural_features)

@@ -4,6 +4,8 @@ import psutil
 import logging
 from collections import defaultdict
 
+from detection_config import load_config
+
 # Commands/args consistent with an attacker (or malware with local admin)
 # disabling Windows Defender out-of-band. Found necessary because a live
 # audit of this host showed Tamper Protection is OFF - nothing in Defender
@@ -145,7 +147,21 @@ def _is_dangerous_access(access_int, dangerous_bits):
 
 
 class HeuristicEngine:
-    def __init__(self):
+    def __init__(self, rule_engine=None, config=None):
+        # Optional additive YAML rule pack (src/rule_engine.py) - evaluated
+        # after every hardcoded rule below, routed through the same
+        # _add_score() every hardcoded rule uses, so a custom rule inherits
+        # the protected-process floor and decay for free. None (the
+        # default) is the exact behavior this engine had before rule packs
+        # existed.
+        self.rule_engine = rule_engine
+        # Numeric tunables (decay rate, thresholds, ransomware window/count)
+        # - see detection_config.py. Deliberately does NOT cover the safety
+        # floor below (PROTECTED_PROCESS_NAMES, access-mask bitmasks,
+        # pattern lists) - those stay hardcoded so a config file can never
+        # loosen them. A missing/malformed config file yields the exact
+        # hardcoded values this engine always used.
+        self.config = config if config is not None else load_config()
         self.process_scores = {}
         self.static_scores = {}
         # pid -> list of recent FileCreate timestamps, for the ransomware
@@ -244,6 +260,9 @@ class HeuristicEngine:
             elif event_id == 13:
                 self._handle_registry_event(data_dict)
 
+            if self.rule_engine:
+                self.rule_engine.evaluate_behavioral(event_id, data_dict, self)
+
         except Exception as e:
             logging.error(f"[ERROR] Parsing event XML failed: {e}")
 
@@ -276,7 +295,7 @@ class HeuristicEngine:
         if last_time is None or pid not in self.process_scores:
             return
         elapsed = time.monotonic() - last_time
-        decayed = self.process_scores[pid] - (elapsed * SCORE_DECAY_PER_SECOND)
+        decayed = self.process_scores[pid] - (elapsed * self.config['decay_points_per_second'])
         self.process_scores[pid] = max(0.0, decayed)
 
     def _reset_score_if_pid_reused(self, pid):
@@ -297,12 +316,14 @@ class HeuristicEngine:
 
     def _check_threshold(self, pid):
         score = self.process_scores.get(pid, 0)
-        if score >= 80:
+        critical = self.config['thresholds']['critical']
+        warning = self.config['thresholds']['warning']
+        if score >= critical:
             logging.warning(f"[CRITICAL THREAT] PID {pid} crossed mitigation threshold (Score {score}). Mitigating...")
             self.mitigate(pid)
             self.process_scores[pid] = 0 # reset after mitigation
-        elif score >= 50:
-            logging.warning(f"[WARNING] PID {pid} score >= 50. Taking memory snapshot... (Simulated)")
+        elif score >= warning:
+            logging.warning(f"[WARNING] PID {pid} score >= {warning}. Taking memory snapshot... (Simulated)")
 
     def _handle_process_create(self, data):
         # Event ID 1: Flag execution from staging directories
@@ -382,18 +403,21 @@ class HeuristicEngine:
         if not any(d in target for d in RANSOMWARE_MONITORED_DIRS):
             return
 
+        window_seconds = self.config['ransomware']['file_event_window_seconds']
+        threshold = self.config['ransomware']['file_event_threshold']
+
         now = time.monotonic()
 
         timestamps = self._file_event_timestamps[pid]
         timestamps.append(now)
-        cutoff = now - RANSOMWARE_FILE_EVENT_WINDOW_SECONDS
+        cutoff = now - window_seconds
         while timestamps and timestamps[0] < cutoff:
             timestamps.pop(0)
 
-        if len(timestamps) == RANSOMWARE_FILE_EVENT_THRESHOLD:
+        if len(timestamps) == threshold:
             self._add_score(
                 pid, 80,
-                f"{len(timestamps)} file creates/renames in {RANSOMWARE_FILE_EVENT_WINDOW_SECONDS}s - "
+                f"{len(timestamps)} file creates/renames in {window_seconds}s - "
                 f"potential mass encryption (ransomware)"
             )
 

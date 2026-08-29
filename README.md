@@ -21,6 +21,9 @@ worse) when run against real system activity. Those are called out inline.
 - [Safety model](#safety-model-read-this-before-running-it)
 - [Setup](#setup)
 - [Running it](#running-it)
+- [Web dashboard](#web-dashboard)
+- [Custom detection rules](#custom-detection-rules)
+- [Configuration](#configuration)
 - [Workflows](#workflows)
 - [Project layout](#project-layout)
 - [Known limitations / roadmap](#known-limitations--roadmap)
@@ -58,15 +61,21 @@ one shared scoring engine:
    injection that happened *before* the agent started, or isn't covered by
    the Sysmon config.
 
+4. **Custom rule pack** (`src/rule_engine.py`, optional, additive) — every
+   YAML rule under `rules/custom/*.yml` is evaluated alongside the three
+   surfaces above, on the exact same events/samples, scored through the
+   exact same engine. See [Custom detection rules](#custom-detection-rules).
+
 Every finding adds points to a per-process (or per-file-hash, for static
 findings) score in `HeuristicEngine`. Scores **decay over time** (~20
-points/minute) so only activity that compounds *quickly* — the actual shape
-of an attack chain — can reach the action thresholds:
+points/minute by default — see [Configuration](#configuration)) so only
+activity that compounds *quickly* — the actual shape of an attack chain —
+can reach the action thresholds:
 
 | Score | Action |
 |---|---|
-| ≥ 50 | `[WARNING]` logged, simulated memory snapshot (no action taken) |
-| ≥ 80 | `[CRITICAL THREAT]` — `mitigate()` is called: the process is suspended, then terminated |
+| ≥ 50 (configurable) | `[WARNING]` logged, simulated memory snapshot (no action taken) |
+| ≥ 80 (configurable) | `[CRITICAL THREAT]` — `mitigate()` is called: the process is suspended, then terminated |
 
 ## Architecture
 
@@ -99,6 +108,14 @@ features.py  ───────▶│  (PE features, once  │
 `src/main.py` wires all three detection surfaces into one process and keeps
 it alive so the Sysmon subscription callback and the periodic module sweep
 both keep running.
+
+`telemetry_monitor.py`'s `EvtSubscribe` callback only renders each event's
+XML and hands it to a bounded queue (2000 events) before returning
+immediately — a separate worker thread drains that queue into the
+Heuristic Engine. Scoring (including a `mitigate()` call, which blocks on
+`psutil` suspend/terminate) never happens on the OS callback thread, so a
+slow scoring pass can't stall or drop buffered Sysmon events — the same
+split osquery's `WindowsEventLogPublisher` uses, for the same reason.
 
 ## What each detector actually catches
 
@@ -326,7 +343,13 @@ pipeline is actually running.
 every process launch Sysmon reports, flagged or not, kept in its own
 bounded buffer entirely separate from the Detections feed — mixing every
 benign launch into the same feed used for actual findings would drown the
-signal that feed exists to surface.
+signal that feed exists to surface. Its **Lineage** column (Velociraptor's
+process-tracker pattern) resolves each process's ancestry by PID, e.g.
+`explorer.exe -> cmd.exe -> rundll32.exe`, from `src/process_tracker.py`.
+
+**Rules tab.** Shows every rule loaded from `rules/custom/*.yml` (see
+[Custom detection rules](#custom-detection-rules) below) — name, technique,
+score, enabled/disabled, and a live hit counter.
 
 ```powershell
 cd mal_project\src
@@ -344,6 +367,78 @@ reopening in a new elevated window. Click "No" (or run with
 `$env:EDR_NO_ELEVATE=1` first) and it falls back to the same degraded
 static-only mode `main.py` uses when Sysmon isn't available — nothing
 breaks, you just lose real-time behavioral detections.
+
+## Custom detection rules
+
+`src/rule_engine.py` loads every YAML file in `rules/custom/*.yml` and
+evaluates it alongside (never instead of) the hardcoded rules in
+`heuristic_engine.py`/`static_scanner.py` — additive by design, modeled on
+Velociraptor's artifact format and Sigma's structural-match style. Every
+hit is routed through the engine's own `_add_score()`/`add_static_score()`,
+so the protected-process floor, decay, and PID-reuse guard apply to a
+custom rule exactly as they do to every hardcoded one — see
+`test_rule_engine.py`'s `test_custom_rule_cannot_score_a_protected_pid` for
+a test that proves this against the real engine, not a mock.
+
+`match` is a constrained tree of `{field, op, value}` conditions under
+`all`/`any` — **never** an eval'd expression, so a rule *file* can never
+execute code:
+
+```yaml
+id: custom_lolbin_from_appdata_roaming
+name: LOLBin executed from AppData Roaming
+applies_to: process_create   # process_create | process_access | file_create | registry_event | static_pe
+technique: T1218
+score: 35
+match:
+  all:
+    - field: image
+      op: contains
+      value: "\\appdata\\roaming\\"
+    - field: image
+      op: contains
+      value: [rundll32.exe, regsvr32.exe, mshta.exe]
+message: "LOLBin '{image}' launched from AppData\\Roaming"
+enabled: true
+```
+
+Ships with one working example
+([`rules/custom/example_lolbin_appdata.yml`](rules/custom/example_lolbin_appdata.yml)).
+Operators: `equals`, `contains` (value may be a single substring or a list
+of candidate substrings — "does the field contain ANY of these"), `in`,
+`not_in`, `regex`, `gt`, `lt`. Fields are normalized, lowercased Sysmon
+field names per `applies_to` (`image`, `parent_image`, `command_line`,
+`target_image`, `granted_access`, `target_filename`, `target_object`); for
+`static_pe`, see `StaticScanner`'s feature dict (`filename`, `hash`,
+`imports_flat`, `max_entropy`, `has_rwx_section`, `string_indicators`,
+`imphash`, `company_name`, `product_name`, `has_signature`). A malformed
+rule file is skipped with a logged warning, never fatal — drop a new file
+in and it's picked up on the next process start, no code changes required.
+Loaded rules and their live hit counts are visible in the dashboard's
+Rules tab.
+
+## Configuration
+
+`config/detection.yml` holds the numeric tunables `src/detection_config.py`
+loads at startup — decay rate, the warning/critical thresholds, and the
+ransomware burst window/count. **Not** configurable here, on purpose: the
+protected-process floor, LSASS/hollowing access-mask bitmasks, and
+Defender-tamper/PowerShell-abuse pattern lists all stay hardcoded in
+`heuristic_engine.py`, so a bad or malicious edit to this file can never
+loosen the one thing that must never move (see
+[Safety model](#safety-model-read-this-before-running-it)). A missing or
+malformed config file falls back to exactly the hardcoded defaults this
+engine always used — deleting the file changes nothing.
+
+```yaml
+decay_points_per_second: 0.3333
+thresholds:
+  warning: 50
+  critical: 80
+ransomware:
+  file_event_window_seconds: 20
+  file_event_threshold: 60
+```
 
 ## Workflows
 
@@ -400,6 +495,13 @@ engine.evaluate_event(event(1,
 
 ### Adding a new detection rule
 
+For a straightforward pattern match, drop a YAML file in `rules/custom/`
+(see [Custom detection rules](#custom-detection-rules)) — no code changes,
+no restart-required build step, picked up on the next process start.
+
+For anything the constrained `{field, op, value}` match language can't
+express (bitmask checks, rate-based detectors, cross-event correlation):
+
 1. Add the scoring logic to the relevant `_handle_*` method in
    `heuristic_engine.py` (or a new one, dispatched from `evaluate_event()`).
 2. If it needs a Sysmon event type not already logged, add an
@@ -422,6 +524,9 @@ mal_project/
 │   ├── static_scanner.py   Reads data/binaries.json, scores static PE findings
 │   ├── telemetry_monitor.py  Sysmon EvtSubscribe wiring
 │   ├── module_inspector.py Active live-process module sweep
+│   ├── rule_engine.py       Additive YAML rule pack (rules/custom/*.yml) - see Custom detection rules
+│   ├── detection_config.py  Config-driven tunables (config/detection.yml) - decay/thresholds/ransomware window
+│   ├── process_tracker.py   Parent/child process lineage (Velociraptor pattern) for Process Explorer
 │   ├── web_server.py        Dashboard entry point - same wiring as main.py + JSON API, self-elevates
 │   ├── dashboard_data.py    Pure data-shaping (severity/category, chart/table rows) for web_server.py
 │   ├── webapp/              Dashboard frontend (HTML/CSS/JS, Chart.js via CDN)
@@ -430,10 +535,13 @@ mal_project/
 │   ├── extract_features.py Offline PE feature extractor (pefile-based, never executes samples)
 │   ├── threat_intel_sync.py MalwareBazaar metadata sync (imphash/family intel, never downloads samples)
 │   └── sysmon/              Sysmon config.xml (binaries gitignored - see Setup)
+├── config/
+│   └── detection.yml         Numeric tunables for detection_config.py (safety floor stays hardcoded)
 ├── rules/
 │   ├── static.yar            Structural YARA rules (RWX, entropy, LSASS-dump IAT, impersonation)
 │   ├── family_signatures.yar YARA rules for specific known samples analyzed in reports/
-│   └── sigma.yml              Sigma rules mirroring every Sysmon-driven heuristic
+│   ├── sigma.yml              Sigma rules mirroring every Sysmon-driven heuristic
+│   └── custom/                Additive YAML detection rules, evaluated by src/rule_engine.py
 ├── data/
 │   ├── binaries.json         Extracted PE features (output of extract_features.py)
 │   └── known_imphashes.json  Family/imphash intel (output of threat_intel_sync.py; absent until you run it)

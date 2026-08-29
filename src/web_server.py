@@ -30,6 +30,9 @@ from heuristic_engine import HeuristicEngine
 from static_scanner import StaticScanner
 from telemetry_monitor import start_monitor
 from module_inspector import ModuleInspector
+from rule_engine import RuleEngine
+from detection_config import load_config
+from process_tracker import ProcessTracker
 import dashboard_data as dd
 
 HOST = "127.0.0.1"  # loopback only - this server exposes a process-kill endpoint
@@ -125,16 +128,31 @@ class Backend:
         logging.getLogger().addHandler(AlertLogHandler(self.alert_store))
         logging.getLogger().setLevel(logging.INFO)
 
-        self.engine = HeuristicEngine()
+        # Additive YAML rule pack + config-driven tunables - same instances
+        # main.py's CLI entrypoint constructs, so the dashboard and the CLI
+        # never quietly diverge in what they detect.
+        self.rules = RuleEngine()
+        self.config = load_config()
+        self.engine = HeuristicEngine(rule_engine=self.rules, config=self.config)
         self.process_activity = ProcessActivityStore()
-        self.engine.on_event = self.process_activity.add
+        self.process_tracker = ProcessTracker()
+        self.engine.on_event = self._on_raw_event
         self.sensor_status = "initializing"
         self.inspector = ModuleInspector(self.engine)
         self._sysmon_handle = None
 
+    def _on_raw_event(self, event_id, data):
+        """Single fan-out point for HeuristicEngine.on_event - every raw
+        Sysmon event feeds both the Process Explorer buffer and the
+        lineage tracker, without either of them knowing about the other or
+        heuristic_engine.py's on_event contract needing to support more
+        than one observer."""
+        self.process_activity.add(event_id, data)
+        self.process_tracker.add(event_id, data)
+
     def start(self):
         logging.info("[*] Starting Static Ingress Scanner...")
-        StaticScanner(self.engine, BINARIES_PATH).scan()
+        StaticScanner(self.engine, BINARIES_PATH, rule_engine=self.rules).scan()
         logging.info("[+] Static Scan Complete.")
 
         logging.info("[*] Starting Behavioral Telemetry Monitor...")
@@ -233,7 +251,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(dd.build_static_rows(backend.engine, BINARIES_PATH))
         elif path == "/api/process-activity":
             limit = int(query.get("limit", [200])[0])
-            self._send_json(backend.process_activity.snapshot(limit))
+            rows = backend.process_activity.snapshot(limit)
+            for row in rows:
+                try:
+                    row["lineage"] = backend.process_tracker.lineage_string(int(row["pid"]))
+                except (TypeError, ValueError):
+                    row["lineage"] = ""
+            self._send_json(rows)
+        elif path == "/api/rules":
+            self._send_json(backend.rules.summary())
         else:
             self._send_json({"error": "not found"}, 404)
 

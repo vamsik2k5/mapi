@@ -1,0 +1,19 @@
+# Detection tunables for the EDR prototype. Anything left out here falls
+# back to the hardcoded default in src/detection_config.py - deleting this
+# file entirely is safe and changes nothing.
+#
+# NOT configurable here, on purpose: the protected-process safety floor,
+# LSASS/hollowing access-mask bitmasks, and Defender-tamper/PowerShell-abuse
+# pattern lists. Those stay hardcoded in src/heuristic_engine.py so a bad or
+# malicious edit to this file can never loosen the one thing that must never
+# move - see README's "Safety model" section.
+
+decay_points_per_second: 0.3333  # ~20 points/minute
+
+thresholds:
+  warning: 50
+  critical: 80
+
+ransomware:
+  file_event_window_seconds: 20
+  file_event_threshold: 60

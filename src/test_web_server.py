@@ -87,18 +87,46 @@ def test_process_activity_store_newest_first_and_bounded():
     assert [r["pid"] for r in rows] == ["3", "2"], "newest event must be first"
 
 
-def test_backend_wires_engine_events_into_process_activity():
+def test_backend_wires_engine_events_into_process_activity_and_tracker():
     backend = ws.Backend()
-    assert backend.engine.on_event == backend.process_activity.add  # bound methods: '==' not 'is'
+    assert backend.engine.on_event == backend._on_raw_event  # bound methods: '==' not 'is'
     backend.engine.evaluate_event(
         '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
         '<System><EventID>1</EventID></System>'
-        '<EventData><Data Name="ProcessId">4242</Data><Data Name="Image">calc.exe</Data></EventData>'
+        '<EventData><Data Name="ProcessId">4242</Data><Data Name="ParentProcessId">1</Data>'
+        '<Data Name="Image">calc.exe</Data></EventData>'
         '</Event>'
     )
     rows = backend.process_activity.snapshot()
     assert len(rows) == 1
     assert rows[0]["pid"] == "4242"
+    # the same fan-out point must also have fed the lineage tracker
+    assert backend.process_tracker.get_chain(4242) == ["calc.exe"]
+
+
+def test_backend_constructs_rule_engine_and_config():
+    backend = ws.Backend()
+    assert backend.engine.rule_engine is backend.rules
+    assert backend.engine.config is backend.config
+    # RuleEngine() picks up the real rules/custom/*.yml, which ships with
+    # one example rule - a real, non-mocked integration check that the
+    # shipped example actually loads.
+    ids = [r['id'] for r in backend.rules.summary()]
+    assert 'custom_lolbin_from_appdata_roaming' in ids
+
+
+def test_rules_endpoint_reflects_rule_engine_summary():
+    backend = ws.Backend()
+    baseline_count = len(backend.rules.summary())
+    # simulate an additional loaded rule without needing a real YAML file on disk
+    from rule_engine import Rule
+    fake_rule = Rule({'id': 'r1', 'applies_to': 'process_create', 'score': 10,
+                       'match': {'all': [{'field': 'image', 'op': 'contains', 'value': 'x'}]}}, source_file='<test>')
+    backend.rules.rules.append(fake_rule)
+    backend.rules.hit_counts['r1'] = 0
+    summary = backend.rules.summary()
+    assert len(summary) == baseline_count + 1
+    assert any(r['id'] == 'r1' for r in summary)
 
 
 def test_dashboard_server_refuses_to_share_a_port():
@@ -118,6 +146,8 @@ if __name__ == "__main__":
     test_wait_for_dashboard_false_when_unreachable()
     test_process_activity_store_captures_process_create_only()
     test_process_activity_store_newest_first_and_bounded()
-    test_backend_wires_engine_events_into_process_activity()
+    test_backend_wires_engine_events_into_process_activity_and_tracker()
+    test_backend_constructs_rule_engine_and_config()
+    test_rules_endpoint_reflects_rule_engine_summary()
     test_dashboard_server_refuses_to_share_a_port()
     print("OK")

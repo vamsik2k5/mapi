@@ -163,6 +163,22 @@ class HeuristicEngine:
         # in _add_score.
         self._last_score_time = {}
         self._own_pid = os.getpid()
+        # Raw telemetry heartbeat, independent of scoring: every Sysmon
+        # event that reaches evaluate_event() increments this, whether or
+        # not any heuristic below fires on it. Most process/file/registry
+        # activity on a normal machine matches none of the suspicious
+        # patterns in this file by design, so it produces no score and no
+        # log line - which looks identical to "the subscription is dead"
+        # from the outside. This counter is what a dashboard should watch
+        # to tell those two situations apart.
+        self.total_events_seen = 0
+        self.last_event_time = None
+        # Optional callable(event_id, data_dict) invoked for every raw
+        # Sysmon event regardless of scoring - lets an external observer
+        # (e.g. the web dashboard's Process Explorer) see all activity
+        # without this engine taking on any storage/rendering concerns of
+        # its own, and without changing what gets scored.
+        self.on_event = None
         logging.basicConfig(level=logging.INFO, format='[*] %(message)s')
 
     def _is_protected(self, pid):
@@ -199,6 +215,8 @@ class HeuristicEngine:
             if event_id_elem is None:
                 return
             event_id = int(event_id_elem.text)
+            self.total_events_seen += 1
+            self.last_event_time = time.time()
 
             event_data = root.find('{http://schemas.microsoft.com/win/2004/08/events/event}EventData')
             if event_data is None:
@@ -210,6 +228,12 @@ class HeuristicEngine:
                 value = data.text
                 if name:
                     data_dict[name] = value
+
+            if self.on_event:
+                try:
+                    self.on_event(event_id, data_dict)
+                except Exception:
+                    pass  # an observer's bug must never break detection
 
             if event_id == 1:
                 self._handle_process_create(data_dict)

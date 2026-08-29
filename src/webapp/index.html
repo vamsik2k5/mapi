@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Defensive Agent Console</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Defensive Agent <span>Console</span></div>
+  <div class="topbar-right">
+    <span id="sensorStatus" class="badge badge-neutral">Sensor: connecting...</span>
+    <button id="isolateBtn" class="btn btn-danger-outline">Isolate Host</button>
+  </div>
+</header>
+
+<main>
+  <section class="stat-grid">
+    <div class="stat-card">
+      <div class="stat-value" id="statTotalAlerts">0</div>
+      <div class="stat-label">Total Alerts</div>
+    </div>
+    <div class="stat-card critical">
+      <div class="stat-value" id="statCritical">0</div>
+      <div class="stat-label">Critical Threats</div>
+    </div>
+    <div class="stat-card warning">
+      <div class="stat-value" id="statWarning">0</div>
+      <div class="stat-label">Warnings</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="statProcesses">0</div>
+      <div class="stat-label">Processes Monitored</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="statSamples">0</div>
+      <div class="stat-label">Samples Scanned</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value"><span id="liveDot" class="live-dot"></span><span id="statTelemetry">0</span></div>
+      <div class="stat-label">Telemetry Events <span id="statLastEvent" class="stat-sublabel"></span></div>
+    </div>
+  </section>
+
+  <section class="chart-grid">
+    <div class="panel chart-panel wide">
+      <h3>Detections Over Time</h3>
+      <canvas id="timeseriesChart" height="90"></canvas>
+    </div>
+    <div class="panel chart-panel">
+      <h3>By Technique</h3>
+      <canvas id="categoryChart" height="90"></canvas>
+    </div>
+    <div class="panel chart-panel">
+      <h3>Top Endpoint Scores</h3>
+      <canvas id="processChart" height="90"></canvas>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="detections">Detections</button>
+      <button class="tab-btn" data-tab="endpoints">Endpoint Processes</button>
+      <button class="tab-btn" data-tab="static">Static Analysis</button>
+      <button class="tab-btn" data-tab="explorer">Process Explorer</button>
+    </div>
+
+    <div class="tab-content active" id="tab-detections">
+      <div class="table-toolbar">
+        <input type="text" id="alertFilter" placeholder="Filter detections...">
+        <select id="severityFilter">
+          <option value="">All severities</option>
+          <option value="CRITICAL">Critical</option>
+          <option value="WARNING">Warning</option>
+          <option value="INFO">Info</option>
+        </select>
+      </div>
+      <table>
+        <thead><tr><th>Time</th><th>Severity</th><th>Technique</th><th>Message</th></tr></thead>
+        <tbody id="alertsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="tab-content" id="tab-endpoints">
+      <table>
+        <thead><tr><th>PID</th><th>Process</th><th>Threat Score</th><th>Verdict</th><th></th></tr></thead>
+        <tbody id="processBody"></tbody>
+      </table>
+    </div>
+
+    <div class="tab-content" id="tab-static">
+      <table>
+        <thead><tr><th>File</th><th>SHA-256</th><th>Score</th><th>Verdict</th></tr></thead>
+        <tbody id="staticBody"></tbody>
+      </table>
+    </div>
+
+    <div class="tab-content" id="tab-explorer">
+      <p class="tab-note">Every process launch Sysmon reports, whether or not it was flagged - proof the telemetry pipeline is live, same view Falcon/Singularity call Process Explorer / Storyline.</p>
+      <div class="table-toolbar">
+        <input type="text" id="explorerFilter" placeholder="Filter by image, parent, or command line...">
+      </div>
+      <table>
+        <thead><tr><th>Time</th><th>PID</th><th>Image</th><th>Parent</th><th>Command Line</th></tr></thead>
+        <tbody id="explorerBody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

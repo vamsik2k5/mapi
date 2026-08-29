@@ -1,0 +1,142 @@
+:root {
+  --bg: #14161a;
+  --panel: #1c1f26;
+  --panel-2: #22262e;
+  --border: #2b2f38;
+  --fg: #e6e6e6;
+  --muted: #9aa0a6;
+  --accent: #3aa0ff;
+  --critical: #ff4d4d;
+  --warning: #ffb020;
+  --info: #6c7280;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { font-size: 18px; font-weight: 600; }
+.brand span { color: var(--accent); font-weight: 400; }
+
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+
+.badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+.badge-neutral { background: #2b2f38; color: var(--muted); }
+.badge-ok { background: rgba(58,160,255,0.15); color: var(--accent); }
+.badge-off { background: rgba(255,77,77,0.15); color: var(--critical); }
+
+.btn {
+  border-radius: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn:hover { background: #2a2f38; }
+.btn-danger-outline { border-color: var(--critical); color: var(--critical); background: transparent; }
+.btn-danger-outline:hover { background: rgba(255,77,77,0.1); }
+.btn-small { padding: 3px 10px; font-size: 12px; }
+
+main { padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.stat-sublabel { display: block; margin-top: 2px; font-size: 11px; }
+.live-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 8px;
+  background: var(--info);
+}
+.live-dot.live { background: #2ecc71; box-shadow: 0 0 6px #2ecc71; }
+.live-dot.stale { background: var(--warning); }
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.stat-card.critical { border-color: rgba(255,77,77,0.4); }
+.stat-card.warning { border-color: rgba(255,176,32,0.4); }
+.stat-value { font-size: 28px; font-weight: 700; }
+.stat-card.critical .stat-value { color: var(--critical); }
+.stat-card.warning .stat-value { color: var(--warning); }
+.stat-label { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.chart-panel h3 { margin: 0 0 10px 0; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+}
+.tab-btn.active { color: var(--fg); border-bottom-color: var(--accent); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+.table-toolbar { display: flex; gap: 10px; margin-bottom: 10px; }
+.table-toolbar input, .table-toolbar select {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.table-toolbar input { flex: 1; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+tbody tr:hover { background: var(--panel-2); }
+
+.sev-CRITICAL { color: var(--critical); font-weight: 600; }
+.sev-WARNING { color: var(--warning); font-weight: 600; }
+.sev-INFO { color: var(--info); }
+
+.empty-row td { color: var(--muted); text-align: center; padding: 20px; }
+.tab-note { color: var(--muted); font-size: 12px; margin: 0 0 12px 0; }

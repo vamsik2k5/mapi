@@ -303,6 +303,48 @@ static scan and its findings still run fine standalone.
 
 Press `Ctrl+C` to stop.
 
+## Web dashboard
+
+`src/web_server.py` serves a Falcon/Singularity-style dashboard (stat
+tiles, detections-over-time and by-technique charts, an endpoint process
+table with a Terminate action, static-scan verdicts, a live Telemetry
+Events heartbeat, and a Process Explorer tab) on top of the exact same
+`HeuristicEngine`/`StaticScanner`/Sysmon/`ModuleInspector` wiring as
+`main.py` — no detection logic changes, just a JSON API + static files.
+Stdlib-only (`http.server`), nothing new to install; the frontend is
+vanilla HTML/CSS/JS with charts drawn by Chart.js from a CDN.
+
+**Telemetry Events tile.** Most process/file/registry activity on a normal
+machine matches none of the suspicious patterns in `heuristic_engine.py`
+and produces no alert, by design — indistinguishable from "the Sysmon
+subscription is dead" from the dashboard alone. This tile counts every
+Sysmon event `evaluate_event()` receives, scored or not, with a live/stale
+indicator dot, so you can watch it tick up in real time as proof the
+pipeline is actually running.
+
+**Process Explorer tab.** A Falcon/Singularity-style raw activity view:
+every process launch Sysmon reports, flagged or not, kept in its own
+bounded buffer entirely separate from the Detections feed — mixing every
+benign launch into the same feed used for actual findings would drown the
+signal that feed exists to surface.
+
+```powershell
+cd mal_project\src
+..\.venv\Scripts\python.exe web_server.py
+```
+
+Then open `http://127.0.0.1:8787`. Bound to loopback only, on purpose —
+the process-terminate endpoint should never be reachable off the box.
+
+**Runs elevated automatically.** On launch, if the process isn't already
+Administrator, it re-invokes itself via Windows' own UAC consent prompt —
+approve it once and the same behavioral telemetry that used to need a
+manually-opened elevated PowerShell just starts, with the dashboard
+reopening in a new elevated window. Click "No" (or run with
+`$env:EDR_NO_ELEVATE=1` first) and it falls back to the same degraded
+static-only mode `main.py` uses when Sysmon isn't available — nothing
+breaks, you just lose real-time behavioral detections.
+
 ## Workflows
 
 ### Extracting features from a new sample
@@ -379,7 +421,11 @@ mal_project/
 │   ├── heuristic_engine.py Central scoring engine, all detection logic, mitigate()
 │   ├── static_scanner.py   Reads data/binaries.json, scores static PE findings
 │   ├── telemetry_monitor.py  Sysmon EvtSubscribe wiring
-│   └── module_inspector.py Active live-process module sweep
+│   ├── module_inspector.py Active live-process module sweep
+│   ├── web_server.py        Dashboard entry point - same wiring as main.py + JSON API, self-elevates
+│   ├── dashboard_data.py    Pure data-shaping (severity/category, chart/table rows) for web_server.py
+│   ├── webapp/              Dashboard frontend (HTML/CSS/JS, Chart.js via CDN)
+│   └── test_*.py            Self-checks (synthetic-XML rule tests, static-scan fixtures, mocked sweeps) - `python test_x.py`
 ├── tools/
 │   ├── extract_features.py Offline PE feature extractor (pefile-based, never executes samples)
 │   ├── threat_intel_sync.py MalwareBazaar metadata sync (imphash/family intel, never downloads samples)

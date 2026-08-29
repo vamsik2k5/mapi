@@ -42,6 +42,10 @@ def test_categorize_ignores_lifecycle_messages_even_with_keyword_collision():
     assert categorize("[RULES] Loaded custom rule 'custom_lolbin_from_appdata_roaming' from example.yml") == "Other"
     assert categorize("[*] Starting Static Ingress Scanner...") == "Other"
     assert categorize("[!] Failed to subscribe to Sysmon events: access denied") == "Other"
+    # Same class of bug, same fix: an allowlist suppression echoes the
+    # *suppressed* finding's text for operator context, but nothing was
+    # actually detected - must not count toward a technique's tally either.
+    assert categorize("[ALLOWLIST] abc123 -> ignoring finding, hash is known-good (reason: test) | Would-be: +40 (security_svc.exe: High-risk IAT (Keylogger/Exfil pattern))") == "Other"
     # a rule actually firing (different prefix) must still be categorized normally
     assert categorize("[TELEMETRY] PID 1 -> +35 ([RULE:custom_lolbin_from_appdata_roaming] LOLBin 'x' launched)") == "Execution"
 

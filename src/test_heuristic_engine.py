@@ -269,6 +269,65 @@ def test_mitigate_actually_terminates_a_real_disposable_process():
     assert not psutil.pid_exists(proc.pid)
 
 
+# ---- known-good hash allowlist ---------------------------------------------
+
+def test_allowlisted_hash_suppresses_static_score():
+    engine = HeuristicEngine(known_good_hashes={"deadbeef": {"reason": "verified vendor installer"}})
+    engine.add_static_score("deadbeef", 90, "should be ignored")
+    assert "deadbeef" not in engine.static_scores
+
+
+def test_non_allowlisted_hash_scores_normally():
+    engine = HeuristicEngine(known_good_hashes={"deadbeef": {"reason": "test"}})
+    engine.add_static_score("cafebabe", 40, "unrelated finding")
+    assert engine.static_scores["cafebabe"] == 40
+
+
+def test_allowlist_suppresses_across_multiple_findings_for_the_same_hash():
+    # The allowlist check lives in add_static_score() itself, so it must
+    # suppress every call for that hash, not just the first.
+    engine = HeuristicEngine(known_good_hashes={"deadbeef": {"reason": "test"}})
+    engine.add_static_score("deadbeef", 30, "finding one")
+    engine.add_static_score("deadbeef", 40, "finding two")
+    engine.add_static_score("deadbeef", 50, "finding three")
+    assert "deadbeef" not in engine.static_scores
+
+
+def test_is_allowlisted_helper():
+    engine = HeuristicEngine(known_good_hashes={"deadbeef": {"reason": "test"}})
+    assert engine.is_allowlisted("deadbeef") is True
+    assert engine.is_allowlisted("cafebabe") is False
+
+
+def test_default_engine_has_no_allowlist_entries():
+    # data/known_good_hashes.json won't exist in a normal checkout/test run
+    # - the loader must fail open to an empty allowlist, not crash and not
+    # suppress everything.
+    engine = HeuristicEngine()
+    assert engine.known_good_hashes == {}
+    engine.add_static_score("anyhash", 30, "must still score normally")
+    assert engine.static_scores["anyhash"] == 30
+
+
+def test_load_known_good_hashes_missing_file_returns_empty():
+    import os
+    import tempfile
+    missing_path = os.path.join(tempfile.gettempdir(), "definitely_does_not_exist_xyz.json")
+    assert he._load_known_good_hashes(missing_path) == {}
+
+
+def test_load_known_good_hashes_malformed_file_returns_empty():
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        f.write("{not valid json")
+        path = f.name
+    try:
+        assert he._load_known_good_hashes(path) == {}
+    finally:
+        import os
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

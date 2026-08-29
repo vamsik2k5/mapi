@@ -40,7 +40,14 @@ CATEGORY_RULES = (
 # nothing was ever detected. A rule *firing* (logged with a different
 # prefix, "[TELEMETRY]"/"[STATIC]") still gets categorized normally - only
 # messages that were never a finding in the first place are exempted here.
-NON_FINDING_PREFIXES = ('[RULES]', '[*]', '[+]', '[-]', '[!]')
+#
+# [ALLOWLIST] belongs in this set for the same underlying reason, not a new
+# one: its message embeds the *suppressed* finding's own text (e.g.
+# "...Would-be: +40 (... Keylogger/Exfil pattern)") purely for operator
+# context, but nothing was actually detected on this system - it was
+# overridden as known-good. Counting it toward a technique's tally would
+# make the chart claim a live finding that a human already vetted away.
+NON_FINDING_PREFIXES = ('[RULES]', '[ALLOWLIST]', '[*]', '[+]', '[-]', '[!]')
 
 
 def severity_of(record: logging.LogRecord) -> str:

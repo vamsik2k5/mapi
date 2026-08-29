@@ -1,10 +1,30 @@
 import os
+import json
 import time
 import psutil
 import logging
 from collections import defaultdict
 
 from detection_config import load_config
+
+# Known-good SHA-256 -> {"reason": ..., "source": ..., "added": ...}, checked
+# in add_static_score() before any static finding (hardcoded rule, imphash
+# match, or custom rule_engine.py hit) is allowed to accumulate score.
+# Mirrors ClamAV's .fp/.sfp false-positive-suppression hash database:
+# a human-vetted, unconditional override sitting in front of detection,
+# not another rule competing for weight inside it. Absent by default, same
+# as data/known_imphashes.json - deleting/never creating this file changes
+# nothing.
+DEFAULT_KNOWN_GOOD_HASHES_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'known_good_hashes.json')
+
+
+def _load_known_good_hashes(path):
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
 
 # Commands/args consistent with an attacker (or malware with local admin)
 # disabling Windows Defender out-of-band. Found necessary because a live
@@ -147,7 +167,7 @@ def _is_dangerous_access(access_int, dangerous_bits):
 
 
 class HeuristicEngine:
-    def __init__(self, rule_engine=None, config=None):
+    def __init__(self, rule_engine=None, config=None, known_good_hashes=None):
         # Optional additive YAML rule pack (src/rule_engine.py) - evaluated
         # after every hardcoded rule below, routed through the same
         # _add_score() every hardcoded rule uses, so a custom rule inherits
@@ -162,6 +182,12 @@ class HeuristicEngine:
         # loosen them. A missing/malformed config file yields the exact
         # hardcoded values this engine always used.
         self.config = config if config is not None else load_config()
+        # Known-good SHA-256 allowlist (data/known_good_hashes.json by
+        # default) - see add_static_score(). Unlike config/rule_engine
+        # above, this is meant to be hand-edited by a human vetting a
+        # specific false positive, the same trust model as this engine's
+        # other operator-editable inputs.
+        self.known_good_hashes = known_good_hashes if known_good_hashes is not None else _load_known_good_hashes(DEFAULT_KNOWN_GOOD_HASHES_PATH)
         self.process_scores = {}
         self.static_scores = {}
         # pid -> list of recent FileCreate timestamps, for the ransomware
@@ -208,7 +234,26 @@ class HeuristicEngine:
             return False
         return name in PROTECTED_PROCESS_NAMES
 
+    def is_allowlisted(self, file_hash):
+        """True if `file_hash` is in the known-good allowlist - callers
+        (e.g. static_scanner.py's clone-detection log line) that need to
+        check this ahead of calling add_static_score() use this instead of
+        reaching into known_good_hashes directly."""
+        return file_hash in self.known_good_hashes
+
     def add_static_score(self, file_hash, score, context):
+        if file_hash in self.known_good_hashes:
+            # Single choke point every static finding already routes
+            # through - hardcoded rules, imphash-family matches, and
+            # rule_engine.py's static_pe hits alike - so allowlisting a
+            # hash here suppresses all of them uniformly, unconditionally,
+            # before any score is ever recorded. Never a rule competing
+            # for weight inside the scoring system, always a hard override
+            # in front of it.
+            entry = self.known_good_hashes[file_hash]
+            reason = entry.get('reason', '?') if isinstance(entry, dict) else '?'
+            logging.info(f"[ALLOWLIST] {file_hash} -> ignoring finding, hash is known-good (reason: {reason}) | Would-be: +{score} ({context})")
+            return
         if file_hash not in self.static_scores:
             self.static_scores[file_hash] = 0
         self.static_scores[file_hash] += score

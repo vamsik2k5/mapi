@@ -206,7 +206,14 @@ class StaticScanner:
             if struct_hash in structural_hashes:
                 other_file = structural_hashes[struct_hash]
                 if other_file['sha256'] != file_hash:
-                    logging.warning(f"[STATIC] Metamorphic Clone Detected! {filename} and {other_file['filename']} share exact structural hash but different SHA-256.")
+                    # add_static_score() already no-ops for an allowlisted
+                    # file_hash, but that alone leaves this WARNING log line
+                    # firing regardless - a known-good file would still show
+                    # up as a "Metamorphic Clone Detected!" alert even
+                    # though its score is correctly suppressed. Guard the
+                    # log line itself too.
+                    if not self.engine.is_allowlisted(file_hash):
+                        logging.warning(f"[STATIC] Metamorphic Clone Detected! {filename} and {other_file['filename']} share exact structural hash but different SHA-256.")
                     self.engine.add_static_score(file_hash, 50, "Metamorphic Clone")
             else:
                 structural_hashes[struct_hash] = {

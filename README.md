@@ -23,6 +23,7 @@ worse) when run against real system activity. Those are called out inline.
 - [Running it](#running-it)
 - [Web dashboard](#web-dashboard)
 - [Custom detection rules](#custom-detection-rules)
+- [Known-good hash allowlist](#known-good-hash-allowlist)
 - [Configuration](#configuration)
 - [Workflows](#workflows)
 - [Project layout](#project-layout)
@@ -417,6 +418,40 @@ in and it's picked up on the next process start, no code changes required.
 Loaded rules and their live hit counts are visible in the dashboard's
 Rules tab.
 
+## Known-good hash allowlist
+
+`data/known_good_hashes.json` (absent by default, same as
+`data/known_imphashes.json` — deleting it changes nothing) is a flat
+SHA-256 allowlist checked in `HeuristicEngine.add_static_score()`, the one
+choke point every static finding already routes through:
+
+```json
+{
+  "<sha256>": {
+    "reason": "verified vendor installer, manually reviewed 2026-08-29",
+    "source": "manual",
+    "added": "2026-08-29"
+  }
+}
+```
+
+Because the check lives in `add_static_score()` itself, listing a hash
+here suppresses *every* static finding for it uniformly — hardcoded rules,
+imphash-family matches, and `rules/custom/*.yml` hits alike — with zero
+special-casing anywhere else. It's an unconditional override sitting in
+front of detection, not another rule competing for weight inside it,
+mirrored on ClamAV's `.fp`/`.sfp` false-positive-suppression database.
+This is a hand-maintained, human-vetted list by design (the same trust
+model as this project's other operator-editable inputs — custom rules,
+`config/detection.yml`) — nothing populates it automatically.
+
+**Scope**: this covers *static file* scanning only. A known-good binary's
+*live process* can still accumulate behavioral score from
+`heuristic_engine.py`'s Sysmon-driven rules — extending the allowlist to
+behavioral events would need Sysmon configured to emit file hashes on
+`ProcessCreate` (not in `tools/sysmon/config.xml` today) and is a
+meaningfully larger change than this one.
+
 ## Configuration
 
 `config/detection.yml` holds the numeric tunables `src/detection_config.py`
@@ -544,7 +579,8 @@ mal_project/
 │   └── custom/                Additive YAML detection rules, evaluated by src/rule_engine.py
 ├── data/
 │   ├── binaries.json         Extracted PE features (output of extract_features.py)
-│   └── known_imphashes.json  Family/imphash intel (output of threat_intel_sync.py; absent until you run it)
+│   ├── known_imphashes.json  Family/imphash intel (output of threat_intel_sync.py; absent until you run it)
+│   └── known_good_hashes.json  Hand-maintained SHA-256 allowlist (absent by default; see Known-good hash allowlist)
 ├── samples/                 Raw samples go here locally - not committed (see samples/README.md)
 ├── reports/                 Manual malware analysis write-ups for specific samples
 └── scripts/

@@ -6,6 +6,7 @@ python test_static_scanner.py
 """
 
 import json
+import logging
 import os
 import tempfile
 
@@ -13,10 +14,10 @@ from heuristic_engine import HeuristicEngine
 from static_scanner import StaticScanner
 
 
-def _scan(entries, known_imphashes=None):
+def _scan(entries, known_imphashes=None, known_good_hashes=None, rule_engine=None):
     """Run StaticScanner against a synthetic binaries.json (and optional
     known_imphashes.json) and return the resulting HeuristicEngine."""
-    engine = HeuristicEngine()
+    engine = HeuristicEngine(known_good_hashes=known_good_hashes)
     with tempfile.TemporaryDirectory() as d:
         binaries_path = os.path.join(d, "binaries.json")
         with open(binaries_path, "w") as f:
@@ -26,8 +27,23 @@ def _scan(entries, known_imphashes=None):
         with open(imphashes_path, "w") as f:
             json.dump(known_imphashes or {}, f)
 
-        StaticScanner(engine, binaries_path, known_imphashes_path=imphashes_path).scan()
+        StaticScanner(engine, binaries_path, known_imphashes_path=imphashes_path, rule_engine=rule_engine).scan()
     return engine
+
+
+class _CaptureLogs:
+    """Minimal log-record capture for asserting a specific WARNING was (or
+    wasn't) emitted, without pulling in a test framework's caplog fixture."""
+
+    def __enter__(self):
+        self.records = []
+        self.handler = logging.Handler()
+        self.handler.emit = self.records.append
+        logging.getLogger().addHandler(self.handler)
+        return self.records
+
+    def __exit__(self, *exc):
+        logging.getLogger().removeHandler(self.handler)
 
 
 def _entry(sha256, **overrides):
@@ -142,6 +158,78 @@ def test_unrelated_files_do_not_collide_as_clones():
     entry_b = _entry("d4" * 32, sections=[{"name": ".data", "is_rwx": False, "entropy": 1.0, "virtual_size": 222}], imports={})
     engine = _scan([entry_a, entry_b])
     assert engine.static_scores == {}
+
+
+# ---- known-good hash allowlist, exercised through the real scan pipeline --
+
+def test_allowlist_suppresses_a_hardcoded_rule_hit():
+    entry = _entry("e" * 64, sections=[{"name": "UPX0", "is_rwx": True, "entropy": 1.0, "virtual_size": 100}])
+    engine = _scan([entry], known_good_hashes={"e" * 64: {"reason": "known packer, verified benign"}})
+    assert "e" * 64 not in engine.static_scores
+
+
+def test_allowlist_does_not_affect_other_samples_in_the_same_scan():
+    # Distinct virtual_size on each so they aren't structural clones of one
+    # another - this test is only about allowlist isolation, not the
+    # separate metamorphic-clone detector.
+    allowlisted = _entry("e" * 64, sections=[{"name": "UPX0", "is_rwx": True, "entropy": 1.0, "virtual_size": 100}])
+    normal = _entry("f" * 64, sections=[{"name": "UPX0", "is_rwx": True, "entropy": 1.0, "virtual_size": 200}])
+    engine = _scan([allowlisted, normal], known_good_hashes={"e" * 64: {"reason": "test"}})
+    assert "e" * 64 not in engine.static_scores
+    assert engine.static_scores["f" * 64] == 30
+
+
+def test_allowlist_suppresses_a_custom_rule_engine_hit_too():
+    # The allowlist lives in add_static_score(), which every static finding
+    # already routes through - hardcoded checks AND rule_engine.py hits
+    # alike - so this must be suppressed with zero special-casing in
+    # static_scanner.py's rule_engine integration.
+    from rule_engine import RuleEngine
+    with tempfile.TemporaryDirectory() as rules_dir:
+        with open(os.path.join(rules_dir, "r.yml"), "w") as f:
+            json.dump({
+                "id": "custom_static_test_rule",
+                "applies_to": "static_pe",
+                "score": 40,
+                "match": {"all": [{"field": "imports_flat", "op": "contains", "value": "writeprocessmemory"}]},
+                "message": "suspicious import",
+            }, f)
+        rules = RuleEngine(rules_dir=rules_dir)
+
+    entry = _entry("1a" * 32, imports={"kernel32.dll": ["WriteProcessMemory"]})
+    engine = _scan([entry], known_good_hashes={"1a" * 32: {"reason": "test"}}, rule_engine=rules)
+    assert "1a" * 32 not in engine.static_scores
+
+
+def test_metamorphic_clone_log_and_score_both_suppressed_for_allowlisted_clone():
+    shared_sections = [{"name": ".text", "is_rwx": False, "entropy": 1.0, "virtual_size": 4096}]
+    shared_imports = {"kernel32.dll": ["CreateFileW"]}
+    entry_a = _entry("a1" * 32, sections=shared_sections, imports=shared_imports, file_name="original.exe")
+    entry_b = _entry("b2" * 32, sections=shared_sections, imports=shared_imports, file_name="repacked_clone.exe")
+
+    with _CaptureLogs() as records:
+        engine = _scan([entry_a, entry_b], known_good_hashes={"b2" * 32: {"reason": "test"}})
+
+    assert "b2" * 32 not in engine.static_scores, "score must still be suppressed"
+    warnings = [r.getMessage() for r in records if r.levelno == logging.WARNING and "Metamorphic Clone Detected" in r.getMessage()]
+    assert warnings == [], f"an allowlisted file must never produce this alert, got: {warnings}"
+
+
+def test_metamorphic_clone_log_still_fires_when_clone_is_not_allowlisted():
+    # Regression guard for the fix above: only the allowlisted file's own
+    # clone-detection line is suppressed - an unrelated, non-allowlisted
+    # clone must still alert normally.
+    shared_sections = [{"name": ".text", "is_rwx": False, "entropy": 1.0, "virtual_size": 4096}]
+    shared_imports = {"kernel32.dll": ["CreateFileW"]}
+    entry_a = _entry("a1" * 32, sections=shared_sections, imports=shared_imports, file_name="original.exe")
+    entry_b = _entry("b2" * 32, sections=shared_sections, imports=shared_imports, file_name="repacked_clone.exe")
+
+    with _CaptureLogs() as records:
+        engine = _scan([entry_a, entry_b])
+
+    assert engine.static_scores["b2" * 32] == 50
+    warnings = [r.getMessage() for r in records if r.levelno == logging.WARNING and "Metamorphic Clone Detected" in r.getMessage()]
+    assert len(warnings) == 1
 
 
 if __name__ == "__main__":

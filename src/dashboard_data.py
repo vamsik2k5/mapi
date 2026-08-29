@@ -31,6 +31,17 @@ CATEGORY_RULES = (
     ("Execution", ("staging directory", "lolbin", "macro dropper", "powershell", "obfuscated", "keylogger")),
 )
 
+# Prefixes for pure lifecycle/status log lines - never keyword-categorized.
+# Without this, a custom rule pack's own metadata (its `id`/`name`, echoed
+# back verbatim in the "[RULES] Loaded custom rule '<id>'..." startup
+# announcement) can coincidentally contain a category keyword - e.g. a rule
+# id containing "lolbin" made a one-time "rule loaded" log line show up as
+# an "Execution" technique hit on the dashboard's chart, even though
+# nothing was ever detected. A rule *firing* (logged with a different
+# prefix, "[TELEMETRY]"/"[STATIC]") still gets categorized normally - only
+# messages that were never a finding in the first place are exempted here.
+NON_FINDING_PREFIXES = ('[RULES]', '[*]', '[+]', '[-]', '[!]')
+
 
 def severity_of(record: logging.LogRecord) -> str:
     """Map a stdlib log record to the CRITICAL/WARNING/INFO buckets the
@@ -50,6 +61,8 @@ def severity_of(record: logging.LogRecord) -> str:
 
 
 def categorize(message: str) -> str:
+    if message.startswith(NON_FINDING_PREFIXES):
+        return "Other"
     lower = message.lower()
     for label, keywords in CATEGORY_RULES:
         if any(k in lower for k in keywords):

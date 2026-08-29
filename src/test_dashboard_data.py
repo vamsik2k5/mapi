@@ -33,6 +33,19 @@ def test_categorize_first_match_wins():
     assert categorize("something with no known keywords") == "Other"
 
 
+def test_categorize_ignores_lifecycle_messages_even_with_keyword_collision():
+    # Regression test: a custom rule's own id/name can legitimately contain
+    # a category keyword (e.g. "custom_lolbin_from_appdata_roaming"). The
+    # one-time "[RULES] Loaded custom rule '<id>'..." startup announcement
+    # that echoes it back is not a finding and must never be categorized as
+    # one, even though the raw text contains "lolbin".
+    assert categorize("[RULES] Loaded custom rule 'custom_lolbin_from_appdata_roaming' from example.yml") == "Other"
+    assert categorize("[*] Starting Static Ingress Scanner...") == "Other"
+    assert categorize("[!] Failed to subscribe to Sysmon events: access denied") == "Other"
+    # a rule actually firing (different prefix) must still be categorized normally
+    assert categorize("[TELEMETRY] PID 1 -> +35 ([RULE:custom_lolbin_from_appdata_roaming] LOLBin 'x' launched)") == "Execution"
+
+
 def test_build_process_rows_sorts_and_labels():
     engine = HeuristicEngine()
     engine.process_scores = {111111: 90, 222222: 60, 333333: 10}
@@ -85,6 +98,7 @@ def test_category_counts_sorted_descending():
 if __name__ == "__main__":
     test_severity_of()
     test_categorize_first_match_wins()
+    test_categorize_ignores_lifecycle_messages_even_with_keyword_collision()
     test_build_process_rows_sorts_and_labels()
     test_build_static_rows_recovers_filename_and_verdict()
     test_bucket_alerts_places_in_correct_minute_and_ignores_outside_window()

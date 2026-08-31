@@ -3,7 +3,7 @@ import json
 import time
 import psutil
 import logging
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 from detection_config import load_config
 
@@ -146,6 +146,11 @@ PROTECTED_PROCESS_NAMES = frozenset({
 # that call even succeeds - check by number first, before touching psutil.
 PROTECTED_PIDS = frozenset({0, 4})
 
+# Bound on _recent_check_dedup (see HeuristicEngine._score_once) - same
+# bounded-eviction spirit as ProcessTracker's own cap, so a correlator
+# running for a long time can't grow this dict without limit.
+DEDUP_MAX_ENTRIES = 2000
+
 
 def _parse_granted_access(raw):
     """Sysmon's GrantedAccess field as an int, or 0 if unparseable."""
@@ -221,6 +226,23 @@ class HeuristicEngine:
         # without this engine taking on any storage/rendering concerns of
         # its own, and without changing what gets scored.
         self.on_event = None
+        # Optional ProcessCorrelator (process_correlator.py) - None by
+        # default, meaning evaluate_event's event_id 1 path goes straight to
+        # _dispatch exactly as it always has (every single-sensor test in
+        # this file relies on that). When main.py/web_server.py set this
+        # after construction (same after-the-fact-wiring pattern as
+        # on_event above), a ProcessCreate event is handed to the
+        # correlator's submit_sysmon() instead, so it can be fused with a
+        # matching ETW ProcessStart observed for the same pid.
+        self.correlator = None
+        # dedup_key -> set(check_id already scored for it) - see
+        # _score_once(). Only ever populated when a caller supplies a
+        # '_dedup_key' (the ProcessCorrelator does, for its provisional/
+        # fused pair of dispatches representing one real process-create
+        # event); plain single-sensor Sysmon dispatches never set this key,
+        # so _score_once() falls through to unconditional scoring for them
+        # - zero behavior change for the existing single-sensor path.
+        self._recent_check_dedup = OrderedDict()
         logging.basicConfig(level=logging.INFO, format='[*] %(message)s')
 
     def _is_protected(self, pid):
@@ -267,7 +289,7 @@ class HeuristicEngine:
         try:
             # Sysmon event namespace
             root = ET.fromstring(xml_content)
-            
+
             system = root.find('{http://schemas.microsoft.com/win/2004/08/events/event}System')
             if system is None:
                 return
@@ -290,26 +312,106 @@ class HeuristicEngine:
                 if name:
                     data_dict[name] = value
 
-            if self.on_event:
-                try:
-                    self.on_event(event_id, data_dict)
-                except Exception:
-                    pass  # an observer's bug must never break detection
-
-            if event_id == 1:
-                self._handle_process_create(data_dict)
-            elif event_id == 10:
-                self._handle_process_access(data_dict)
-            elif event_id == 11:
-                self._handle_file_create(data_dict)
-            elif event_id == 13:
-                self._handle_registry_event(data_dict)
-
-            if self.rule_engine:
-                self.rule_engine.evaluate_behavioral(event_id, data_dict, self)
+            if event_id == 1 and self.correlator is not None:
+                # Hand off to the correlator instead of dispatching directly
+                # - it decides whether this becomes an immediate sysmon-only
+                # dispatch (ETW down/missed it) or gets fused with a
+                # matching ETW ProcessStart for the same pid. Event IDs
+                # 10/11/13 are untouched - they always go straight to
+                # _dispatch, exactly as before the correlator existed.
+                self.correlator.submit_sysmon(data_dict, data_dict.get('UtcTime'))
+            else:
+                self._dispatch(event_id, data_dict)
 
         except Exception as e:
             logging.error(f"[ERROR] Parsing event XML failed: {e}")
+
+    def evaluate_etw_process_start(self, pid, parent_pid, image_name, create_time=None):
+        """Entry point for the ETW Kernel-Process sensor (etw_monitor.py) -
+        the ETW-native counterpart to evaluate_event()'s Sysmon EventID 1
+        path. The raw kernel ProcessStart event only ever carries
+        ProcessID/ParentProcessID/ImageName/CreateTime (empirically
+        confirmed via Get-WinEvent -ListProvider) - no CommandLine, no
+        parent *image path* (only a parent PID). CommandLine/ParentImage
+        are set to None rather than omitted, so every existing
+        command-line-dependent check (which already treats a missing/None
+        field as "does not match" - see rule_engine.py's _field_matches
+        and the plain `pattern in ''` checks below) correctly and
+        structurally cannot fire on this thin data, with no special-casing
+        required anywhere else."""
+        try:
+            self.total_events_seen += 1
+            self.last_event_time = time.time()
+            data = {
+                'ProcessId': pid,
+                'ParentProcessId': parent_pid,
+                'Image': image_name,
+                'ParentImage': None,
+                'CommandLine': None,
+                'CreateTime': create_time,
+                '_source': 'etw',
+            }
+            self._dispatch(1, data)
+        except Exception as e:
+            logging.error(f"[ERROR] Handling ETW process-start event failed: {e}")
+
+    def _dispatch(self, event_id, data_dict):
+        """Shared tail for every event source (Sysmon XML, ETW) once it's
+        been normalized into a plain dict: observer hook, hardcoded
+        handler routing, then the additive rule pack. Heartbeat counting
+        happens in each entry point above, not here - see
+        evaluate_etw_process_start's docstring for why."""
+        if self.on_event:
+            try:
+                self.on_event(event_id, data_dict)
+            except Exception:
+                pass  # an observer's bug must never break detection
+
+        if event_id == 1:
+            self._handle_process_create(data_dict)
+        elif event_id == 10:
+            self._handle_process_access(data_dict)
+        elif event_id == 11:
+            self._handle_file_create(data_dict)
+        elif event_id == 13:
+            self._handle_registry_event(data_dict)
+
+        if self.rule_engine:
+            self.rule_engine.evaluate_behavioral(event_id, data_dict, self)
+
+    def _score_once(self, dedup_key, check_id, pid, score, context):
+        """Routes through _add_score exactly once per (dedup_key, check_id)
+        pair. dedup_key is None for every plain single-sensor dispatch
+        (the overwhelming majority - Sysmon-only, or ETW-only with no
+        correlator in front of it), in which case this is a transparent
+        pass-through to _add_score with no behavior change whatsoever.
+        Only the ProcessCorrelator's provisional+fused pair of dispatches
+        for one real process-create event supplies a dedup_key, to stop a
+        non-command-line check (e.g. the staging-directory rule) from
+        scoring the same real event twice - once per dispatch.
+
+        Returns True if this call actually scored (vs. being suppressed as
+        a duplicate) - callers that track their own hit counters (e.g.
+        rule_engine.py) use this to avoid inflating a count on a
+        deduped-away second dispatch of the same real event."""
+        if dedup_key is None:
+            self._add_score(pid, score, context)
+            return True
+
+        if dedup_key not in self._recent_check_dedup:
+            self._recent_check_dedup[dedup_key] = set()
+        else:
+            self._recent_check_dedup.move_to_end(dedup_key)
+        while len(self._recent_check_dedup) > DEDUP_MAX_ENTRIES:
+            self._recent_check_dedup.popitem(last=False)
+
+        seen = self._recent_check_dedup[dedup_key]
+        if check_id in seen:
+            logging.info(f"[DEDUP] Skipping duplicate '{check_id}' for PID {pid} - already scored by an earlier dispatch of this same event")
+            return False
+        seen.add(check_id)
+        self._add_score(pid, score, context)
+        return True
 
     def _add_score(self, pid, score, context):
         if self._is_protected(pid):
@@ -373,23 +475,24 @@ class HeuristicEngine:
     def _handle_process_create(self, data):
         # Event ID 1: Flag execution from staging directories
         pid = int(data.get('ProcessId', 0))
-        image = data.get('Image', '').lower()
-        parent_image = data.get('ParentImage', '').lower()
+        image = (data.get('Image') or '').lower()
+        parent_image = (data.get('ParentImage') or '').lower()
         command_line = (data.get('CommandLine') or '').lower()
+        dedup_key = data.get('_dedup_key')
 
         if 'temp' in image or 'users\\public' in image:
-            self._add_score(pid, 30, f"Execution from staging directory: {image}")
+            self._score_once(dedup_key, 'staging_dir', pid, 30, f"Execution from staging directory: {image}")
 
         if any(pattern in command_line for pattern in DEFENDER_TAMPER_PATTERNS):
-            self._add_score(pid, 90, f"Attempted Defender tampering: {command_line}")
+            self._score_once(dedup_key, 'defender_tamper', pid, 90, f"Attempted Defender tampering: {command_line}")
 
         if any(pattern in command_line for pattern in POWERSHELL_ABUSE_PATTERNS):
-            self._add_score(pid, 45, f"Obfuscated/download-execute command line: {command_line}")
+            self._score_once(dedup_key, 'powershell_abuse', pid, 45, f"Obfuscated/download-execute command line: {command_line}")
 
         parent_name = os.path.basename(parent_image)
         child_name = os.path.basename(image)
         if parent_name in OFFICE_PARENTS and child_name in LOLBIN_CHILDREN:
-            self._add_score(pid, 60, f"Office app '{parent_name}' spawned LOLBin '{child_name}' - likely macro dropper")
+            self._score_once(dedup_key, 'office_lolbin', pid, 60, f"Office app '{parent_name}' spawned LOLBin '{child_name}' - likely macro dropper")
 
     def _handle_process_access(self, data):
         # Event ID 10: Suspicious memory access (PROCESS_VM_WRITE to svchost.exe)

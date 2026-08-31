@@ -4,6 +4,7 @@ ShellExecuteW so this never pops a real UAC prompt. Run: python test_web_server.
 import os
 import subprocess
 import sys
+import time
 
 import web_server as ws
 
@@ -90,6 +91,12 @@ def test_process_activity_store_newest_first_and_bounded():
 def test_backend_wires_engine_events_into_process_activity_and_tracker():
     backend = ws.Backend()
     assert backend.engine.on_event == backend._on_raw_event  # bound methods: '==' not 'is'
+    # Backend wires a ProcessCorrelator unconditionally (see process_correlator.py),
+    # so a ProcessCreate event no longer dispatches synchronously - it's held
+    # for up to fuse_window in case a matching ETW event arrives to fuse
+    # with. Shrink the window and drive the GC directly instead of sleeping
+    # out the real (2s) default in a test.
+    backend.correlator.fuse_window = 0.01
     backend.engine.evaluate_event(
         '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
         '<System><EventID>1</EventID></System>'
@@ -97,6 +104,8 @@ def test_backend_wires_engine_events_into_process_activity_and_tracker():
         '<Data Name="Image">calc.exe</Data></EventData>'
         '</Event>'
     )
+    time.sleep(0.02)
+    backend.correlator._gc_once()
     rows = backend.process_activity.snapshot()
     assert len(rows) == 1
     assert rows[0]["pid"] == "4242"

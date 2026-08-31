@@ -1,15 +1,30 @@
+import threading
 import time
 import logging
 from static_scanner import StaticScanner
 from telemetry_monitor import start_monitor
+from etw_monitor import start_etw_monitor
 from heuristic_engine import HeuristicEngine
 from module_inspector import ModuleInspector
+from process_correlator import ProcessCorrelator
 from rule_engine import RuleEngine
+from sensor_health import SensorHealth, watchdog_loop
 from detection_config import load_config
 
 MODULE_SWEEP_INTERVAL_SECONDS = 30
 
 def main():
+    # force=True is load-bearing, not stylistic: importing etw_monitor (via
+    # `from etw import ...`) pulls in pywintrace's etw/common.py, which
+    # calls logging.basicConfig(level=logging.ERROR) as an import-time side
+    # effect - before this line ever runs. logging.basicConfig() is a no-op
+    # once any handler exists, so without force=True this call (and the
+    # equivalent one HeuristicEngine.__init__ makes) would silently lose,
+    # leaving every INFO-level log (the entire static scan, rule loading,
+    # sensor startup) invisible - confirmed live: exactly this happened
+    # before this line was added.
+    logging.basicConfig(level=logging.INFO, format='[*] %(message)s', force=True)
+
     print("=====================================================")
     print("      Windows Defensive Agent (EDR Prototype)        ")
     print("=====================================================")
@@ -29,12 +44,26 @@ def main():
     scanner.scan()
     logging.info("[+] Static Scan Complete.")
     
-    # 3. Behavioral Telemetry Monitor
-    logging.info("[*] Starting Behavioral Telemetry Monitor...")
-    sub_handle = start_monitor(engine)
-    
+    # 3. Behavioral Telemetry Monitors - two independent kernel sensors
+    # (Sysmon via the Event Log, and raw ETW on Microsoft-Windows-Kernel-
+    # Process) fused by a ProcessCorrelator so neither sensor's operation
+    # depends on the other, plus a watchdog that observes (never
+    # auto-restarts - see sensor_health.py) whether each is still alive.
+    logging.info("[*] Starting Behavioral Telemetry Monitors...")
+    correlator = ProcessCorrelator(engine, fuse_window=config['correlator']['fuse_window_seconds'])
+    engine.correlator = correlator
+    correlator.start()
+
+    sysmon_health = SensorHealth("sysmon")
+    etw_health = SensorHealth("etw")
+    sub_handle = start_monitor(engine, on_heartbeat=sysmon_health.touch)
+    etw_handle = start_etw_monitor(engine, on_heartbeat=etw_health.touch, correlator=correlator)
+    threading.Thread(target=watchdog_loop, args=([sysmon_health, etw_health],), daemon=True).start()
+
     if not sub_handle:
-        logging.warning("[-] Telemetry monitor failed to start. Continuing with static analysis only.")
+        logging.warning("[-] Sysmon telemetry monitor failed to start. Continuing with reduced telemetry.")
+    if not etw_handle:
+        logging.warning("[-] ETW telemetry monitor failed to start. Continuing with reduced telemetry.")
 
     # 4. Active Module Provenance Sweeper (System Informer-style)
     # Complements the passive Sysmon subscription above by periodically

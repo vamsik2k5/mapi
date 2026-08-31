@@ -16,6 +16,7 @@ worse) when run against real system activity. Those are called out inline.
 
 - [How it works](#how-it-works)
 - [Architecture](#architecture)
+- [Kernel telemetry: ETW + Sysmon correlation](#kernel-telemetry-etw--sysmon-correlation)
 - [What each detector actually catches](#what-each-detector-actually-catches)
 - [Threat intel sync (MalwareBazaar)](#threat-intel-sync-malwarebazaar)
 - [Safety model](#safety-model-read-this-before-running-it)
@@ -46,11 +47,16 @@ one shared scoring engine:
    files with identical structure but different hashes — the same malware
    family repacked).
 
-2. **Behavioral telemetry** (`src/telemetry_monitor.py` +
-   `src/heuristic_engine.py`) — subscribes to the
-   `Microsoft-Windows-Sysmon/Operational` event log in real time
-   (`EvtSubscribe`, push-based) and scores live process/file/registry
-   activity: credential-access attempts against LSASS, process-hollowing
+2. **Behavioral telemetry — two independent kernel sensors** fused into one
+   stream (`src/telemetry_monitor.py`, `src/etw_monitor.py`,
+   `src/process_correlator.py` + `src/heuristic_engine.py`): Sysmon's
+   `Microsoft-Windows-Sysmon/Operational` event log (`EvtSubscribe`,
+   push-based, rich fields) and raw ETW on
+   `Microsoft-Windows-Kernel-Process` (`pywintrace`, thinner fields but
+   lower latency and independent of Sysmon being installed/configured at
+   all) both feed the same scoring engine — see [Kernel telemetry: ETW +
+   Sysmon correlation](#kernel-telemetry-etw--sysmon-correlation). Findings
+   scored: credential-access attempts against LSASS, process-hollowing
    attempts against `svchost.exe`, Defender-tampering commands, obfuscated
    PowerShell, Office-macro-style dropper chains, Run-key persistence, and
    ransomware-style mass file writes.
@@ -94,16 +100,25 @@ features.py  ───────▶│  (PE features, once  │
 └──────────────┘        │                 │
                          │  Heuristic       │      score ≥ 80
 ┌──────────────┐        │  Engine          │──────────────────▶ mitigate()
-│ Sysmon        │──EvtSubscribe──▶ telemetry_ │  (per-PID /       (suspend +
-│ Operational   │        │  monitor.py │ per-file-hash    terminate,
-│ log           │        │                 │  scoring,          PROTECTED
-└──────────────┘        │                 │  decay,           processes
-                         │                 │  PID-reuse        refused)
-┌──────────────┐        │                 │  guard)
+│ Sysmon        │─EvtSubscribe→ telemetry_  │  (per-PID /       (suspend +
+│ Operational   │        │  monitor.py ─┐   │   per-file-hash    terminate,
+│ log           │        │              │   │   scoring,          PROTECTED
+└──────────────┘        │              ▼   │   decay,           processes
+                         │        Process   │   PID-reuse        refused)
+┌──────────────┐        │        Correlator │   guard)
+│ Kernel-Process│──ETW trace→ etw_monitor.py│───┘
+│ (ETW provider)│        │        (fuses      │
+└──────────────┘        │      provisional/   │
+                         │      fused events)  │
+┌──────────────┐        │                 │
 │ module_       │─every─▶│                 │
 │ inspector.py  │ 30s     └─────────────────┘
-│ (live sweep)  │
-└──────────────┘
+│ (live sweep)  │              ▲
+└──────────────┘               │
+                    ┌───────────┴───────────┐
+                    │  SensorHealth watchdog  │  observes both sensors'
+                    │  (sensor_health.py)     │  heartbeats, logs staleness
+                    └─────────────────────────┘  (never auto-restarts)
 ```
 
 `src/main.py` wires all three detection surfaces into one process and keeps
@@ -117,6 +132,68 @@ Heuristic Engine. Scoring (including a `mitigate()` call, which blocks on
 `psutil` suspend/terminate) never happens on the OS callback thread, so a
 slow scoring pass can't stall or drop buffered Sysmon events — the same
 split osquery's `WindowsEventLogPublisher` uses, for the same reason.
+
+## Kernel telemetry: ETW + Sysmon correlation
+
+Behavioral detection runs on **two independent kernel sensors**, not one:
+
+- **Sysmon** (`telemetry_monitor.py`) — the existing `EvtSubscribe` path.
+  Rich fields (`CommandLine`, full parent image path), but depends on
+  Sysmon being installed and its config covering the right event types.
+- **Raw ETW** (`etw_monitor.py`) — consumes
+  `Microsoft-Windows-Kernel-Process` directly via
+  [`pywintrace`](https://github.com/fireeye/pywintrace) (Apache-licensed,
+  pure `ctypes`, no C compiler needed). Needs no Sysmon install at all and
+  delivers `ProcessStart` lower-latency than Sysmon's own enrichment
+  pipeline — but the raw kernel event only ever carries `ProcessID`,
+  `ParentProcessID`, `ImageName`, `CreateTime` (empirically confirmed via
+  `Get-WinEvent -ListProvider Microsoft-Windows-Kernel-Process` against a
+  real capture). **No `CommandLine`, no parent *image path* (only a parent
+  PID)** — a real, permanent gap versus Sysmon, not a bug. Every
+  command-line-dependent check (Defender-tampering, obfuscated PowerShell)
+  structurally cannot fire on ETW-only data, by design — see
+  `HeuristicEngine.evaluate_etw_process_start`'s docstring.
+
+`process_correlator.py`'s `ProcessCorrelator` fuses the two for the same
+real process, keyed on PID:
+
+1. ETW's event usually arrives first → dispatched **immediately** as a
+   *provisional* finding (`_source: "etw"`), so latency never waits on
+   Sysmon.
+2. Sysmon's richer event arrives shortly after → held, not dispatched yet.
+3. A background GC pass (every 5s) closes out any pending record older
+   than `fuse_window` (2.0s, tunable in `config/detection.yml`): if both
+   sources arrived, dispatch once more as *fused* (`_source: "fused"`,
+   carrying Sysmon's `CommandLine`/`ParentImage`); if only Sysmon arrived
+   (ETW down or missed it), dispatch as `_source: "sysmon"` — matching
+   pre-correlator behavior exactly.
+
+A dedup guard (`HeuristicEngine._score_once`, keyed on `(pid, check_id)`)
+stops a non-command-line check (e.g. the staging-directory rule) from
+scoring the same real event twice across the provisional and fused
+dispatch — command-line-dependent checks never need this, since they
+already can't fire on the provisional dispatch's `CommandLine: None`.
+
+**Either sensor can be down without breaking the other.** A
+`SensorHealth`/`watchdog_loop` pair (`sensor_health.py`) tracks each
+sensor's own heartbeat independently and logs `[WATCHDOG] <name> sensor
+stale` on the *transition* into staleness — this is deliberately
+**observe-only**, it never attempts to restart a dead sensor (safe
+handle-lifecycle management for that needs live-fire testing this
+environment can't safely do). The web dashboard's sensor badge and Process
+Explorer's Source column (`etw`/`fused`/`sysmon`) surface this live — stop
+Sysmon (`sc stop sysmon64`) while the dashboard is running and watch the
+Sysmon badge go stale while ETW-sourced rows keep appearing.
+
+One PID-reuse tradeoff, disclosed rather than hidden: because ETW's
+`CreateTime` and Sysmon's `UtcTime` arrive in different, not reliably
+comparable formats (confirmed by reading `pywintrace`'s source — every ETW
+field is rendered through `TdhFormatProperty`, and a `FILETIME` field like
+`CreateTime` comes back as a locale-formatted string, not a number), the
+correlator keys purely on PID rather than `(pid, timestamp)`. This accepts
+the same PID-reuse race window (bounded by `fuse_window`) that
+`heuristic_engine.py`'s `_reset_score_if_pid_reused` already documents
+elsewhere in this codebase as a known, accepted edge case.
 
 ## What each detector actually catches
 
@@ -264,7 +341,7 @@ running as Administrator.
 ```bash
 cd mal_project
 python -m venv .venv
-.venv\Scripts\pip install pefile psutil pywin32
+.venv\Scripts\pip install pefile psutil pywin32 pyyaml pywintrace
 ```
 
 ### Installing Sysmon
@@ -310,14 +387,16 @@ You should see:
 ```
 [*] Starting Static Ingress Scanner on ../data/binaries.json...
 [+] Static Scan Complete.
-[*] Starting Behavioral Telemetry Monitor...
+[*] Starting Behavioral Telemetry Monitors...
 [+] Sysmon push subscription active. Awaiting real-time events...
+[+] ETW kernel-process capture active. Awaiting real-time events...
 [*] EDR Engine is active. Press Ctrl+C to terminate.
 ```
 
-If Sysmon isn't installed/running, you'll instead see `[-] Telemetry
-monitor failed to start. Continuing with static analysis only.` — the
-static scan and its findings still run fine standalone.
+Either sensor can fail to start independently without stopping the other -
+`[-] Sysmon telemetry monitor failed to start.` and/or `[-] ETW telemetry
+monitor failed to start.` — the static scan and module sweep still run
+fine on their own, and whichever behavioral sensor did start keeps working.
 
 Press `Ctrl+C` to stop.
 
@@ -558,6 +637,9 @@ mal_project/
 │   ├── heuristic_engine.py Central scoring engine, all detection logic, mitigate()
 │   ├── static_scanner.py   Reads data/binaries.json, scores static PE findings
 │   ├── telemetry_monitor.py  Sysmon EvtSubscribe wiring
+│   ├── etw_monitor.py       Raw ETW Kernel-Process sensor (pywintrace) - independent of Sysmon
+│   ├── process_correlator.py Fuses matching ETW + Sysmon process-create events (provisional/fused)
+│   ├── sensor_health.py     Per-sensor heartbeat tracking + observe-only staleness watchdog
 │   ├── module_inspector.py Active live-process module sweep
 │   ├── rule_engine.py       Additive YAML rule pack (rules/custom/*.yml) - see Custom detection rules
 │   ├── detection_config.py  Config-driven tunables (config/detection.yml) - decay/thresholds/ransomware window
@@ -589,6 +671,27 @@ mal_project/
 
 ## Known limitations / roadmap
 
+- **ETW's raw `ProcessStart` event carries no `CommandLine` and no parent
+  *image path*** (only a parent PID) — a permanent kernel-provider
+  limitation, not a bug. Command-line-dependent checks simply can't fire on
+  an ETW-only (unfused) dispatch; see [Kernel telemetry: ETW + Sysmon
+  correlation](#kernel-telemetry-etw--sysmon-correlation).
+- **The sensor watchdog is observe-only** — it logs when Sysmon or ETW goes
+  stale but never attempts to restart either one. Auto-restart needs
+  careful `EvtSubscribe`/ETW-trace handle-lifecycle management and real
+  live-fire testing against genuine sensor death, which this development
+  environment can't safely exercise.
+- **`fuse_window` (default 2.0s, `config/detection.yml`) is provisional,
+  not measured** — it hasn't been tuned against real Sysmon-vs-ETW
+  delivery lag on a live system yet. If fused dispatches are rare in
+  practice, or provisional-only dispatches are common even with both
+  sensors healthy, this is the first knob to check.
+- **The ETW/Sysmon correlator keys on PID alone**, not PID+timestamp — see
+  the tradeoff explained in [Kernel telemetry: ETW + Sysmon
+  correlation](#kernel-telemetry-etw--sysmon-correlation). A PID reused by
+  an unrelated process within one `fuse_window` of the original process
+  exiting could be wrongly fused; the far more common case (reuse well
+  after the window elapses) is unaffected.
 - **EventID 7 (ImageLoad) has a Sigma rule but no engine handler.**
   `rules/sigma.yml`'s "DLL Loaded Into High-Value Process From Staging
   Directory" rule documents the technique and the Sysmon config emits those

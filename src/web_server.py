@@ -29,8 +29,11 @@ from urllib.parse import urlsplit, parse_qs
 from heuristic_engine import HeuristicEngine
 from static_scanner import StaticScanner
 from telemetry_monitor import start_monitor
+from etw_monitor import start_etw_monitor
 from module_inspector import ModuleInspector
+from process_correlator import ProcessCorrelator
 from rule_engine import RuleEngine
+from sensor_health import SensorHealth, watchdog_loop
 from detection_config import load_config
 from process_tracker import ProcessTracker
 import dashboard_data as dd
@@ -112,6 +115,11 @@ class ProcessActivityStore:
                 "parent_image": data.get("ParentImage"),
                 "command_line": data.get("CommandLine"),
                 "user": data.get("User"),
+                # 'sysmon' (default, pre-correlator/single-sensor rows),
+                # 'etw' (provisional - ETW's own thin fields only), or
+                # 'fused' (ETW's low latency + Sysmon's richer fields
+                # merged) - see process_correlator.py.
+                "source": data.get("_source", "sysmon"),
             })
 
     def snapshot(self, limit=None):
@@ -137,9 +145,13 @@ class Backend:
         self.process_activity = ProcessActivityStore()
         self.process_tracker = ProcessTracker()
         self.engine.on_event = self._on_raw_event
-        self.sensor_status = "initializing"
         self.inspector = ModuleInspector(self.engine)
         self._sysmon_handle = None
+        self._etw_handle = None
+        self.correlator = ProcessCorrelator(self.engine, fuse_window=self.config['correlator']['fuse_window_seconds'])
+        self.engine.correlator = self.correlator
+        self.sysmon_health = SensorHealth("sysmon")
+        self.etw_health = SensorHealth("etw")
 
     def _on_raw_event(self, event_id, data):
         """Single fan-out point for HeuristicEngine.on_event - every raw
@@ -155,9 +167,11 @@ class Backend:
         StaticScanner(self.engine, BINARIES_PATH, rule_engine=self.rules).scan()
         logging.info("[+] Static Scan Complete.")
 
-        logging.info("[*] Starting Behavioral Telemetry Monitor...")
-        self._sysmon_handle = start_monitor(self.engine)
-        self.sensor_status = "Sysmon connected" if self._sysmon_handle else "static-only (Sysmon unavailable)"
+        logging.info("[*] Starting Behavioral Telemetry Monitors (Sysmon + ETW)...")
+        self.correlator.start()
+        self._sysmon_handle = start_monitor(self.engine, on_heartbeat=self.sysmon_health.touch)
+        self._etw_handle = start_etw_monitor(self.engine, on_heartbeat=self.etw_health.touch, correlator=self.correlator)
+        threading.Thread(target=watchdog_loop, args=([self.sysmon_health, self.etw_health],), daemon=True).start()
 
         threading.Thread(target=self._module_sweep_loop, daemon=True).start()
 
@@ -166,11 +180,29 @@ class Backend:
             time.sleep(MODULE_SWEEP_INTERVAL_SECONDS)
             self.inspector.sweep()
 
+    def _sensor_label(self, handle, health):
+        """'unavailable' means the sensor never came up at startup (e.g.
+        EvtSubscribe/ETW trace failed) - permanent for this run. 'stale'/
+        'live' come from SensorHealth's heartbeat, computed fresh on every
+        call so a sensor dying mid-run (e.g. `sc stop sysmon64`) is
+        reflected here without needing sensor_status to be re-set anywhere."""
+        if not handle:
+            return "unavailable"
+        return "stale" if health.is_stale() else "live"
+
     def summary(self):
         alerts = self.alert_store.snapshot()
         last_event = self.engine.last_event_time
+        sysmon_label = self._sensor_label(self._sysmon_handle, self.sysmon_health)
+        etw_label = self._sensor_label(self._etw_handle, self.etw_health)
         return {
-            "sensor_status": self.sensor_status,
+            "sensor_status": f"Sysmon: {sysmon_label} | ETW: {etw_label}",
+            # Per-sensor liveness (see sensor_health.py) - observe-only, not
+            # auto-restarted. A stale sensor doesn't mean detection stopped:
+            # the other sensor (and the correlator's sysmon-only/etw-only
+            # fallback dispatch) keeps working independently.
+            "sysmon_stale": self.sysmon_health.is_stale(),
+            "etw_stale": self.etw_health.is_stale(),
             "total_alerts": len(alerts),
             "critical_count": sum(1 for a in alerts if a["severity"] == "CRITICAL"),
             "warning_count": sum(1 for a in alerts if a["severity"] == "WARNING"),
@@ -343,7 +375,17 @@ def _wait_for_dashboard(timeout, interval=0.5):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format='[*] %(message)s')
+    # force=True is load-bearing, not stylistic: importing etw_monitor (via
+    # `from etw import ...`) pulls in pywintrace's etw/common.py, which
+    # calls logging.basicConfig(level=logging.ERROR) as an import-time side
+    # effect - before this line ever runs. logging.basicConfig() is a no-op
+    # once any handler exists, so without force=True this call would
+    # silently lose (confirmed live: it left the whole app logging in
+    # pywintrace's bare ERROR-only, default-format setup instead of ours).
+    # Safe to force here specifically because nothing else has added a
+    # handler yet at this point in startup - Backend() (which adds
+    # AlertLogHandler) isn't constructed until further down this function.
+    logging.basicConfig(level=logging.INFO, format='[*] %(message)s', force=True)
 
     if _wait_for_dashboard(timeout=0):
         logging.info(f"A dashboard is already running at {_dashboard_url()} - opening it instead of starting a duplicate.")

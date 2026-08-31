@@ -60,8 +60,14 @@ function renderSummary(summary) {
   }
 
   const badge = document.getElementById("sensorStatus");
-  badge.textContent = `Sensor: ${summary.sensor_status}`;
-  badge.className = "badge " + (summary.sensor_status.includes("connected") ? "badge-ok" : "badge-off");
+  badge.textContent = summary.sensor_status;
+  let badgeClass = "badge-ok";
+  if (summary.sensor_status.includes("unavailable")) {
+    badgeClass = "badge-off";
+  } else if (summary.sysmon_stale || summary.etw_stale) {
+    badgeClass = "badge-warn";
+  }
+  badge.className = "badge " + badgeClass;
 }
 
 // ---- charts ---------------------------------------------------------------
@@ -211,7 +217,7 @@ function renderExplorer() {
 
   clear(body);
   if (rows.length === 0) {
-    body.appendChild(emptyRow(5, lastActivity.length === 0 ? "No process activity observed yet - needs an elevated, Sysmon-connected run." : "No activity matches this filter."));
+    body.appendChild(emptyRow(6, lastActivity.length === 0 ? "No process activity observed yet - needs an elevated, Sysmon-connected run." : "No activity matches this filter."));
     return;
   }
   for (const e of rows.slice(0, 300)) {
@@ -219,6 +225,8 @@ function renderExplorer() {
     tr.appendChild(el("td", { text: e.time }));
     tr.appendChild(el("td", { text: e.pid }));
     tr.appendChild(el("td", { text: e.image || "" }));
+    const source = e.source || "sysmon";
+    tr.appendChild(el("td", { text: source, className: `src-${source}` }));
     tr.appendChild(el("td", { text: e.lineage || "" }));
     tr.appendChild(el("td", { text: e.command_line || "" }));
     body.appendChild(tr);

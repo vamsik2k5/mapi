@@ -328,6 +328,146 @@ def test_load_known_good_hashes_malformed_file_returns_empty():
         os.unlink(path)
 
 
+# ---- evaluate_etw_process_start (ETW Kernel-Process sensor) ---------------
+
+def test_etw_process_start_scores_staging_dir_rule():
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    engine.evaluate_etw_process_start(pid, parent_pid=1, image_name=r"C:\Users\bob\AppData\Local\Temp\evil.exe")
+    assert engine.process_scores[pid] == 30
+
+
+def test_etw_process_start_counts_toward_heartbeat():
+    engine = HeuristicEngine()
+    before = engine.total_events_seen
+    engine.evaluate_etw_process_start(fresh_pid(), parent_pid=1, image_name=r"C:\Windows\System32\notepad.exe")
+    assert engine.total_events_seen == before + 1
+    assert engine.last_event_time is not None
+
+
+def test_etw_process_start_respects_protected_floor():
+    engine = HeuristicEngine()
+    engine.evaluate_etw_process_start(4, parent_pid=1, image_name=r"C:\Users\bob\AppData\Local\Temp\evil.exe")
+    assert 4 not in engine.process_scores
+
+
+def test_etw_process_start_tags_source():
+    # _dispatch's on_event hook is how Process Explorer would see this -
+    # confirm the '_source' tag a dashboard needs is actually present.
+    seen = []
+    engine = HeuristicEngine()
+    engine.on_event = lambda event_id, data: seen.append(data)
+    engine.evaluate_etw_process_start(fresh_pid(), parent_pid=1, image_name=r"C:\Windows\System32\notepad.exe")
+    assert len(seen) == 1
+    assert seen[0]['_source'] == 'etw'
+
+
+def test_etw_process_start_cannot_fire_command_line_dependent_rules():
+    # The real, permanent capability gap versus Sysmon: raw kernel
+    # ProcessStart has no CommandLine, so a command-line rule structurally
+    # cannot match - this is the documented boundary, verified as a test,
+    # not just a comment.
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    engine.evaluate_etw_process_start(
+        pid, parent_pid=1,
+        image_name=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+    )
+    assert pid not in engine.process_scores, "no CommandLine was ever supplied, so Defender-tamper/PowerShell-abuse cannot fire"
+
+
+def test_evaluate_etw_process_start_never_raises_on_bad_input():
+    engine = HeuristicEngine()
+    engine.evaluate_etw_process_start(None, parent_pid=None, image_name=None)  # must not raise
+
+
+# ---- _dispatch regression: evaluate_event behavior is unchanged -----------
+
+def test_dispatch_extraction_preserves_evaluate_event_behavior():
+    # Same scenario as test_execution_from_staging_directory, run through
+    # the real XML entry point - proves the _dispatch extraction didn't
+    # change evaluate_event()'s observable behavior.
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    engine.evaluate_event(event(1, ProcessId=pid, Image=r"C:\Users\bob\AppData\Local\Temp\evil.exe"))
+    assert engine.process_scores[pid] == 30
+
+
+def test_dispatch_extraction_preserves_heartbeat_even_without_event_data():
+    # Original evaluate_event() increments the heartbeat as soon as
+    # EventID parses, *before* checking whether EventData exists - this
+    # locks that exact ordering in so a future refactor can't silently
+    # move the heartbeat "inside" _dispatch and stop counting this case.
+    engine = HeuristicEngine()
+    before = engine.total_events_seen
+    xml = f'<Event xmlns="{NS}"><System><EventID>1</EventID></System></Event>'  # no EventData at all
+    engine.evaluate_event(xml)
+    assert engine.total_events_seen == before + 1
+
+
+# ---- dedup guard (_score_once) --------------------------------------------
+
+def test_score_once_with_no_dedup_key_behaves_exactly_like_add_score():
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    scored = engine._score_once(None, 'some_check', pid, 25, 'test')
+    assert scored is True
+    assert engine.process_scores[pid] == 25
+
+
+def test_score_once_deduplicates_same_check_and_key():
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    key = (pid, 12345.6)
+    first = engine._score_once(key, 'staging_dir', pid, 30, 'first dispatch')
+    second = engine._score_once(key, 'staging_dir', pid, 30, 'second dispatch of the same event')
+    assert first is True
+    assert second is False
+    assert engine.process_scores[pid] == 30, "the duplicate must not add another 30"
+
+
+def test_score_once_allows_a_different_check_under_the_same_key():
+    # This is the actual point of keying by (dedup_key, check_id) rather
+    # than dedup_key alone: the fused dispatch's NEW command-line-dependent
+    # finding must still score even though the provisional dispatch already
+    # scored a different (path-based) check under the same key. Scores
+    # are chosen to stay under the critical threshold so this test isn't
+    # confounded by mitigate()'s reset-to-0 (see test_handle_process_create_dedup_end_to_end
+    # for a case that deliberately crosses it).
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    key = (pid, 12345.6)
+    engine._score_once(key, 'staging_dir', pid, 30, 'provisional: path-based')
+    scored = engine._score_once(key, 'powershell_abuse', pid, 45, 'fused: command-line-based')
+    assert scored is True
+    assert abs(engine.process_scores[pid] - 75) < 0.01, "decay between back-to-back calls is expected to shave a negligible fraction"
+
+
+def test_score_once_different_keys_are_independent():
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    engine._score_once((pid, 1.0), 'staging_dir', pid, 30, 'event A')
+    scored = engine._score_once((pid, 2.0), 'staging_dir', pid, 30, 'event B - different create_time, different real event')
+    assert scored is True
+    assert abs(engine.process_scores[pid] - 60) < 0.01
+
+
+def test_handle_process_create_dedup_end_to_end():
+    # Simulates the correlator's provisional-then-fused pair for the same
+    # real event via the actual _handle_process_create path, not just
+    # _score_once directly.
+    engine = HeuristicEngine()
+    pid = fresh_pid()
+    dedup_key = (pid, 999.9)
+    provisional = {'ProcessId': pid, 'Image': r'C:\Users\bob\AppData\Local\Temp\evil.exe', '_dedup_key': dedup_key}
+    fused = {'ProcessId': pid, 'Image': r'C:\Users\bob\AppData\Local\Temp\evil.exe',
+             'CommandLine': 'powershell -enc aGVsbG8=', '_dedup_key': dedup_key}
+    engine._handle_process_create(provisional)
+    engine._handle_process_create(fused)
+    # staging_dir (30) once + powershell_abuse (45) once = 75, NOT 30+30+45
+    assert abs(engine.process_scores[pid] - 75) < 0.01
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

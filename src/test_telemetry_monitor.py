@@ -93,6 +93,51 @@ def test_slow_scoring_does_not_block_the_callback_thread():
     assert elapsed < 0.2, f"on_sysmon_event took {elapsed}s - it must never block on scoring"
 
 
+def test_on_heartbeat_fires_on_successful_event():
+    tm.win32evtlog.EvtRender = lambda handle, fmt: "<Event>fake</Event>"
+    q = queue.Queue()
+    calls = []
+    tm.on_sysmon_event(tm.win32evtlog.EvtSubscribeActionDeliver, q, event_handle=object(), on_heartbeat=lambda: calls.append(1))
+    assert calls == [1]
+
+
+def test_on_heartbeat_fires_even_when_queue_is_full():
+    # The sensor observed a real event even though the queue couldn't take
+    # it - that's a scoring-worker backlog, not a dead sensor, so the
+    # heartbeat must still fire.
+    tm.win32evtlog.EvtRender = lambda handle, fmt: "<Event>fake</Event>"
+    q = queue.Queue(maxsize=1)
+    q.put_nowait("<Event>already here</Event>")
+    calls = []
+    tm.on_sysmon_event(tm.win32evtlog.EvtSubscribeActionDeliver, q, event_handle=object(), on_heartbeat=lambda: calls.append(1))
+    assert calls == [1]
+
+
+def test_on_heartbeat_does_not_fire_on_render_failure():
+    def _raise(handle, fmt):
+        raise OSError("event handle invalidated")
+    tm.win32evtlog.EvtRender = _raise
+    q = queue.Queue()
+    calls = []
+    tm.on_sysmon_event(tm.win32evtlog.EvtSubscribeActionDeliver, q, event_handle=object(), on_heartbeat=lambda: calls.append(1))
+    assert calls == [], "a failed render never reached the OS event, so it must not count as a heartbeat"
+
+
+def test_on_heartbeat_does_not_fire_for_non_deliver_actions():
+    calls = []
+    tm.on_sysmon_event(action=999, context=queue.Queue(), event_handle=object(), on_heartbeat=lambda: calls.append(1))
+    assert calls == []
+
+
+def test_missing_on_heartbeat_is_a_safe_default():
+    # Every pre-existing call site (and every test above this one) omits
+    # on_heartbeat entirely - confirms that stays valid.
+    tm.win32evtlog.EvtRender = lambda handle, fmt: "<Event>fake</Event>"
+    q = queue.Queue()
+    tm.on_sysmon_event(tm.win32evtlog.EvtSubscribeActionDeliver, q, event_handle=object())  # must not raise
+    assert q.get_nowait() == "<Event>fake</Event>"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

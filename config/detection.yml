@@ -17,3 +17,9 @@ thresholds:
 ransomware:
   file_event_window_seconds: 20
   file_event_threshold: 60
+
+# How long process_correlator.py waits for a same-pid ETW+Sysmon pair to
+# fuse before dispatching whatever arrived alone. Provisional default, not
+# yet measured against real Sysmon-vs-ETW delivery lag on a live system.
+correlator:
+  fuse_window_seconds: 2.0

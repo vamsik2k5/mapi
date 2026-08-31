@@ -186,13 +186,16 @@ class RuleEngine:
         except (TypeError, ValueError):
             return
 
+        dedup_key = data.get('_dedup_key')
         for rule in self.rules:
             if not rule.enabled or rule.applies_to != applies_to:
                 continue
             try:
                 if rule.matches(feature_dict):
-                    self.hit_counts[rule.id] += 1
-                    engine._add_score(pid, rule.score, f"[RULE:{rule.id}] {rule.render_message(feature_dict)}")
+                    scored = engine._score_once(dedup_key, f"rule:{rule.id}", pid, rule.score,
+                                                 f"[RULE:{rule.id}] {rule.render_message(feature_dict)}")
+                    if scored:
+                        self.hit_counts[rule.id] += 1
             except Exception as e:
                 logging.warning(f"[RULES] Rule '{rule.id}' failed to evaluate, skipping: {e}")
 

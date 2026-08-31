@@ -28,6 +28,13 @@ DEFAULTS = {
         'file_event_window_seconds': 20,
         'file_event_threshold': 60,
     },
+    'correlator': {
+        # How long process_correlator.py waits for a same-pid ETW+Sysmon
+        # pair to fuse before giving up and dispatching whatever arrived
+        # alone - provisional default, not yet measured against real
+        # Sysmon-vs-ETW delivery lag on a live system (see README).
+        'fuse_window_seconds': 2.0,
+    },
 }
 
 

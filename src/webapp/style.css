@@ -43,6 +43,7 @@ body {
 .badge-neutral { background: #2b2f38; color: var(--muted); }
 .badge-ok { background: rgba(58,160,255,0.15); color: var(--accent); }
 .badge-off { background: rgba(255,77,77,0.15); color: var(--critical); }
+.badge-warn { background: rgba(255,176,32,0.15); color: var(--warning); }
 
 .btn {
   border-radius: 6px;
@@ -136,6 +137,14 @@ tbody tr:hover { background: var(--panel-2); }
 
 .sev-CRITICAL { color: var(--critical); font-weight: 600; }
 .sev-WARNING { color: var(--warning); font-weight: 600; }
+
+/* Process Explorer source column - which sensor(s) produced this row. See
+   process_correlator.py: 'etw' is provisional (thin fields, arrived first),
+   'fused' merged in Sysmon's richer fields shortly after, 'sysmon' is the
+   pre-correlator/single-sensor default. */
+.src-etw { color: var(--warning); }
+.src-fused { color: var(--accent); font-weight: 600; }
+.src-sysmon { color: var(--muted); }
 .sev-INFO { color: var(--info); }
 
 .empty-row td { color: var(--muted); text-align: center; padding: 20px; }

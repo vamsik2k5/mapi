@@ -9,9 +9,14 @@ import threading
 EVENT_QUEUE_MAXSIZE = 2000
 
 
-def on_sysmon_event(action, context, event_handle):
+def on_sysmon_event(action, context, event_handle, on_heartbeat=None):
     """EvtSubscribe callback. `context` is the shared queue.Queue this
     module hands to EvtSubscribe at registration time (see start_monitor).
+    `on_heartbeat` is a new, optional keyword-only-in-practice parameter
+    (defaults to None) so every existing positional call site/test keeps
+    working unchanged - EvtSubscribe itself owns `context`'s shape, so
+    liveness reporting is threaded through as a separate parameter instead
+    of being smuggled into it.
 
     EvtRender must happen synchronously, here, on this callback - the OS
     invalidates `event_handle` once this function returns, so rendering
@@ -29,6 +34,14 @@ def on_sysmon_event(action, context, event_handle):
     except Exception as e:
         logging.error(f"[TELEMETRY] Error rendering event: {e}")
         return
+
+    # Heartbeat fires as soon as the sensor itself has observed a real OS
+    # event - independent of whether the queue below can accept it. A full
+    # queue means the *scoring worker* is falling behind, not that the
+    # sensor is dead; conflating the two would make a chronically-backed-up
+    # (but perfectly alive) sensor look stale to the watchdog.
+    if on_heartbeat:
+        on_heartbeat()
 
     try:
         context.put_nowait(xml_content)
@@ -48,17 +61,20 @@ def _scoring_worker(engine_instance, event_queue):
             logging.error(f"[TELEMETRY] Scoring worker failed on an event: {e}")
 
 
-def start_monitor(engine_instance):
+def start_monitor(engine_instance, on_heartbeat=None):
     try:
         logging.info("[*] Subscribing to Microsoft-Windows-Sysmon/Operational via EvtSubscribe...")
         event_queue = queue.Queue(maxsize=EVENT_QUEUE_MAXSIZE)
         threading.Thread(target=_scoring_worker, args=(engine_instance, event_queue), daemon=True).start()
 
+        def _callback(action, context, event_handle):
+            on_sysmon_event(action, context, event_handle, on_heartbeat=on_heartbeat)
+
         subscription_handle = win32evtlog.EvtSubscribe(
             "Microsoft-Windows-Sysmon/Operational",
             win32evtlog.EvtSubscribeToFutureEvents,
             None,
-            on_sysmon_event,
+            _callback,
             event_queue,
             "*"
         )

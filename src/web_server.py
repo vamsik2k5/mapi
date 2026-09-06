@@ -17,6 +17,7 @@ import json
 import time
 import ctypes
 import logging
+import socket
 import subprocess
 import threading
 import urllib.request
@@ -132,6 +133,7 @@ class Backend:
     """Owns the engine + detection surfaces, mirroring main.py's wiring."""
 
     def __init__(self):
+        self.session_start = time.time()
         self.alert_store = AlertStore()
         logging.getLogger().addHandler(AlertLogHandler(self.alert_store))
         logging.getLogger().setLevel(logging.INFO)
@@ -196,6 +198,8 @@ class Backend:
         sysmon_label = self._sensor_label(self._sysmon_handle, self.sysmon_health)
         etw_label = self._sensor_label(self._etw_handle, self.etw_health)
         return {
+            "hostname": socket.gethostname(),
+            "session_start": self.session_start,
             "sensor_status": f"Sysmon: {sysmon_label} | ETW: {etw_label}",
             # Per-sensor liveness (see sensor_health.py) - observe-only, not
             # auto-restarted. A stale sensor doesn't mean detection stopped:
@@ -203,6 +207,13 @@ class Backend:
             # fallback dispatch) keeps working independently.
             "sysmon_stale": self.sysmon_health.is_stale(),
             "etw_stale": self.etw_health.is_stale(),
+            # Structured per-sensor state ("live"/"stale"/"unavailable") for
+            # the dashboard's sensor-health gauge - sensor_status above is
+            # the same information as one display string, kept for the
+            # existing badge rendering.
+            "sysmon_state": sysmon_label,
+            "etw_state": etw_label,
+            "thresholds": self.config['thresholds'],
             "total_alerts": len(alerts),
             "critical_count": sum(1 for a in alerts if a["severity"] == "CRITICAL"),
             "warning_count": sum(1 for a in alerts if a["severity"] == "WARNING"),

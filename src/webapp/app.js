@@ -5,7 +5,10 @@
 // strings (e.g. a malicious CommandLine), so treat them as data, not markup.
 
 const POLL_MS = 2000;
-const COLORS = { critical: "#ff4d4d", warning: "#ffb020", info: "#6c7280", accent: "#3aa0ff" };
+const COLORS = { critical: "#b5432f", warning: "#a97a1f", info: "#5c6570", accent: "#4a7fb5" };
+const CATEGORY_PALETTE = ["#4a7fb5", "#b5432f", "#a97a1f", "#5c6570", "#6f6ba0", "#3f7d5c", "#8a6a3f"];
+const AXIS_COLOR = "#838b96";
+const LEGEND_COLOR = "#d8dade";
 
 let lastAlerts = [];
 let lastActivity = [];
@@ -36,8 +39,73 @@ function emptyRow(colSpan, label) {
   return tr;
 }
 
+// ---- masthead --------------------------------------------------------
+function formatTimestamp(epochSeconds) {
+  if (!epochSeconds) return "—";
+  return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+function renderMasthead(summary) {
+  document.getElementById("metaHost").textContent = summary.hostname || "—";
+  document.getElementById("metaSessionStart").textContent = formatTimestamp(summary.session_start);
+  document.getElementById("metaReportTime").textContent = new Date().toLocaleString();
+}
+
+// ---- gauges ----------------------------------------------------------
+// Circumference of the gauge ring (r=30, see index.html): 2 * PI * 30.
+const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 30;
+
+function setGauge(cardEl, arcEl, textEl, fraction, text, zone) {
+  const clamped = Math.max(0, Math.min(1, fraction));
+  // Round line-cap on a true zero-length arc still paints a visible dot at
+  // the start position - drop the stroke entirely at zero instead.
+  arcEl.setAttribute("stroke-dasharray", clamped > 0 ? String(GAUGE_CIRCUMFERENCE) : "0");
+  arcEl.setAttribute("stroke-dashoffset", String(GAUGE_CIRCUMFERENCE * (1 - clamped)));
+  textEl.textContent = text;
+  cardEl.classList.remove("zone-warning", "zone-critical");
+  if (zone) cardEl.classList.add(zone);
+}
+
+function renderSensorHealthGauge(summary) {
+  // Real, computed value: how many of the two independent kernel sensors
+  // (see process_correlator.py) are currently live - not a fabricated score.
+  const states = [summary.sysmon_state, summary.etw_state];
+  const liveCount = states.filter((s) => s === "live").length;
+  const anyUnavailable = states.some((s) => s === "unavailable");
+  const fraction = liveCount / 2;
+  const zone = liveCount === 2 ? null : anyUnavailable ? "zone-critical" : "zone-warning";
+  setGauge(
+    document.getElementById("gaugeSensorHealth"),
+    document.getElementById("sensorHealthArc"),
+    document.getElementById("sensorHealthText"),
+    fraction, `${liveCount}/2`, zone
+  );
+  document.getElementById("sensorHealthSub").textContent = `Sysmon: ${summary.sysmon_state || "?"} · ETW: ${summary.etw_state || "?"}`;
+}
+
+function renderPeakThreatGauge(summary, processes) {
+  // Real, computed value: the highest current per-process score
+  // (HeuristicEngine.process_scores), same number the Endpoint Processes
+  // table and Top Endpoint Scores chart already show - not a fabricated
+  // "threat radar" figure.
+  const thresholds = summary.thresholds || { warning: 50, critical: 80 };
+  const peak = processes.length ? processes[0].score : 0;
+  const zone = peak >= thresholds.critical ? "zone-critical" : peak >= thresholds.warning ? "zone-warning" : null;
+  setGauge(
+    document.getElementById("gaugePeakThreat"),
+    document.getElementById("peakThreatArc"),
+    document.getElementById("peakThreatText"),
+    peak / 100, String(Math.round(peak)), zone
+  );
+  document.getElementById("peakThreatSub").textContent = processes.length
+    ? `${processes[0].name} (PID ${processes[0].pid})`
+    : "No scored process yet";
+}
+
 // ---- stat tiles ----------------------------------------------------------
 function renderSummary(summary) {
+  renderMasthead(summary);
+  renderSensorHealthGauge(summary);
   document.getElementById("statTotalAlerts").textContent = summary.total_alerts;
   document.getElementById("statCritical").textContent = summary.critical_count;
   document.getElementById("statWarning").textContent = summary.warning_count;
@@ -84,15 +152,15 @@ function initCharts() {
     },
     options: {
       responsive: true,
-      scales: { x: { stacked: true, ticks: { color: "#9aa0a6" } }, y: { stacked: true, beginAtZero: true, ticks: { color: "#9aa0a6" } } },
-      plugins: { legend: { labels: { color: "#e6e6e6" } } },
+      scales: { x: { stacked: true, ticks: { color: AXIS_COLOR } }, y: { stacked: true, beginAtZero: true, ticks: { color: AXIS_COLOR } } },
+      plugins: { legend: { labels: { color: LEGEND_COLOR } } },
     },
   });
 
   charts.category = new Chart(document.getElementById("categoryChart"), {
     type: "doughnut",
-    data: { labels: [], datasets: [{ data: [], backgroundColor: ["#3aa0ff", "#ff4d4d", "#ffb020", "#6c7280", "#8e6cff", "#2ecc71", "#e67e22"] }] },
-    options: { responsive: true, plugins: { legend: { position: "bottom", labels: { color: "#e6e6e6", boxWidth: 10, font: { size: 10 } } } } },
+    data: { labels: [], datasets: [{ data: [], backgroundColor: CATEGORY_PALETTE }] },
+    options: { responsive: true, plugins: { legend: { position: "bottom", labels: { color: LEGEND_COLOR, boxWidth: 10, font: { size: 10 } } } } },
   });
 
   charts.process = new Chart(document.getElementById("processChart"), {
@@ -101,7 +169,7 @@ function initCharts() {
     options: {
       indexAxis: "y",
       responsive: true,
-      scales: { x: { beginAtZero: true, max: 100, ticks: { color: "#9aa0a6" } }, y: { ticks: { color: "#9aa0a6" } } },
+      scales: { x: { beginAtZero: true, max: 100, ticks: { color: AXIS_COLOR } }, y: { ticks: { color: AXIS_COLOR } } },
       plugins: { legend: { display: false } },
     },
   });
@@ -279,6 +347,7 @@ async function poll() {
       getJSON("/api/rules"),
     ]);
     renderSummary(summary);
+    renderPeakThreatGauge(summary, processes);
     lastAlerts = alerts;
     renderAlerts();
     renderTimeseries(timeseries);

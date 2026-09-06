@@ -54,6 +54,15 @@ TASK_PROCESS_START = 1
 
 EVENT_QUEUE_MAXSIZE = 2000
 
+# Confirmed via `logman query providers "Microsoft-Windows-Kernel-Process"`:
+# enabling this provider with no keyword filter (pywintrace's default) also
+# emits WINEVENT_KEYWORD_THREAD/IMAGE/CPU_PRIORITY/etc for every thread start
+# and image load system-wide - a live 8s capture measured 17358 of 17360
+# total events LOST to buffer overflow, starving out the process-start events
+# this module actually wants. Restricting to just this keyword cuts the
+# volume to process start/stop only.
+WINEVENT_KEYWORD_PROCESS = 0x10
+
 
 def _on_etw_event(event_tufo, event_queue, on_heartbeat=None):
     """pywintrace's ETW callback shape: event_tufo = (event_id, event_dict).
@@ -128,7 +137,8 @@ def start_etw_monitor(engine_instance, on_heartbeat=None, correlator=None):
         # source and by an actual run: passing the bare string here raised
         # "byref() argument 1 must be _ctypes._CData, not str".
         # GUID(string) converts via Windows' own CLSIDFromString.
-        provider = ProviderInfo(KERNEL_PROCESS_PROVIDER_NAME, GUID(KERNEL_PROCESS_PROVIDER_GUID))
+        provider = ProviderInfo(KERNEL_PROCESS_PROVIDER_NAME, GUID(KERNEL_PROCESS_PROVIDER_GUID),
+                                 any_keywords=WINEVENT_KEYWORD_PROCESS)
         etw_session = ETW(providers=[provider], event_callback=_callback)
         # ETW.start() is non-blocking - EventConsumer.start() (which it
         # delegates to internally) spawns its own consumer thread and

@@ -35,9 +35,20 @@ DEFENDER_TAMPER_PATTERNS = (
     'set-mppreference', 'disablerealtimemonitoring', 'disableantispyware',
     'disableantivirus', 'disablebehaviormonitoring', 'disableioavprotection',
     'add-mppreference -exclusionpath', 'remove-mppreference',
-    'sc stop windefend', 'sc.exe stop windefend', 'sc config windefend',
-    'net stop windefend', 'taskkill /im msmpeng.exe', 'taskkill /f /im msmpeng.exe',
+    'sc stop windefend', 'sc.exe stop windefend', 'sc config windefend', 'sc.exe config windefend',
+    'net stop windefend', 'net.exe stop windefend', 'net1 stop windefend', 'net1.exe stop windefend',
+    'taskkill /im msmpeng.exe', 'taskkill /f /im msmpeng.exe',
+    'taskkill.exe /im msmpeng.exe', 'taskkill.exe /f /im msmpeng.exe',
 )
+
+
+def _normalize_command_line(command_line):
+    """Drop double quotes and collapse whitespace, so the same command matches
+    however its launcher spelled it. Sysmon records the launcher's exact text:
+    `sc stop windefend` typed at a prompt but `"C:\\WINDOWS\\system32\\sc.exe" stop
+    windefend` when PowerShell launches it - the quote after `sc.exe` defeated
+    the substring patterns above. Used only for pattern matching, never logged."""
+    return ' '.join(command_line.replace('"', ' ').split())
 
 # Classic PowerShell/LOLBin obfuscation and download-execute markers - the
 # post-exploitation technique ASR rules would normally block, compensating
@@ -46,6 +57,32 @@ POWERSHELL_ABUSE_PATTERNS = (
     '-enc ', '-encodedcommand', '-e ', 'frombase64string', 'downloadstring',
     'downloadfile', 'iex(', 'invoke-expression', '-windowstyle hidden',
     '-w hidden', '-executionpolicy bypass', '-ep bypass', '-noprofile -nop',
+)
+
+# The patterns above are PowerShell syntax, so they are only evidence on a
+# PowerShell host's own command line. Matched against every process they
+# false-positived on unrelated tools - the bare '-e ' (PowerShell's
+# -EncodedCommand shorthand) hit any lowercased `grep -E`, `sed -e`,
+# `node -e`, and any wrapper (e.g. `bash -c "... grep -E ..."`) whose command
+# line merely contained one of these words. rules/sigma.yml already scopes
+# the same detection to powershell.exe/pwsh.exe; the engine now matches it.
+# Compared against both the image name and Sysmon's OriginalFileName (the
+# name baked into the PE header), so a renamed copy of powershell.exe still
+# counts; 'pwsh.dll' is what PowerShell 7's pwsh.exe reports there.
+POWERSHELL_HOSTS = ('powershell.exe', 'pwsh.exe', 'pwsh.dll', 'powershell_ise.exe')
+
+# The Defender-tamper patterns are only evidence on the command line of a
+# process that *executes* such a command: an interpreter (PowerShell, cmd) or
+# the utility the pattern names (sc, net/net1, taskkill, reg). Matched against
+# every process this rule was the one way the engine could kill an innocent
+# tool - a single +90 hit crosses the 80 mitigation threshold on its own - and
+# it did for anything whose command line merely *contained* the text: `grep`,
+# `git commit -m`, `python -c`, an editor, a `bash -c` wrapper. Launchers that
+# only pass a command along (wmic, schtasks, mshta, python...) are still caught
+# through the interpreter/utility process they spawn. Same image-or-
+# OriginalFileName matching as POWERSHELL_HOSTS, so a renamed copy still counts.
+DEFENDER_TAMPER_HOSTS = POWERSHELL_HOSTS + (
+    'cmd.exe', 'sc.exe', 'net.exe', 'net1.exe', 'taskkill.exe', 'reg.exe',
 )
 
 # Office apps spawning a shell/scripting interpreter is the classic
@@ -478,19 +515,24 @@ class HeuristicEngine:
         image = (data.get('Image') or '').lower()
         parent_image = (data.get('ParentImage') or '').lower()
         command_line = (data.get('CommandLine') or '').lower()
+        original_name = (data.get('OriginalFileName') or '').lower()
         dedup_key = data.get('_dedup_key')
+        child_name = os.path.basename(image)
 
         if 'temp' in image or 'users\\public' in image:
             self._score_once(dedup_key, 'staging_dir', pid, 30, f"Execution from staging directory: {image}")
 
-        if any(pattern in command_line for pattern in DEFENDER_TAMPER_PATTERNS):
-            self._score_once(dedup_key, 'defender_tamper', pid, 90, f"Attempted Defender tampering: {command_line}")
+        is_defender_tamper_host = child_name in DEFENDER_TAMPER_HOSTS or original_name in DEFENDER_TAMPER_HOSTS
+        if is_defender_tamper_host:
+            tamper_line = _normalize_command_line(command_line)
+            if any(pattern in tamper_line for pattern in DEFENDER_TAMPER_PATTERNS):
+                self._score_once(dedup_key, 'defender_tamper', pid, 90, f"Attempted Defender tampering: {command_line}")
 
-        if any(pattern in command_line for pattern in POWERSHELL_ABUSE_PATTERNS):
+        is_powershell_host = child_name in POWERSHELL_HOSTS or original_name in POWERSHELL_HOSTS
+        if is_powershell_host and any(pattern in command_line for pattern in POWERSHELL_ABUSE_PATTERNS):
             self._score_once(dedup_key, 'powershell_abuse', pid, 45, f"Obfuscated/download-execute command line: {command_line}")
 
         parent_name = os.path.basename(parent_image)
-        child_name = os.path.basename(image)
         if parent_name in OFFICE_PARENTS and child_name in LOLBIN_CHILDREN:
             self._score_once(dedup_key, 'office_lolbin', pid, 60, f"Office app '{parent_name}' spawned LOLBin '{child_name}' - likely macro dropper")
 

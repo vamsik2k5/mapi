@@ -122,6 +122,20 @@ main { padding: 18px 24px 32px; max-width: 1440px; margin: 0 auto; }
 .gauge-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .gauge-sublabel { color: var(--muted); font-size: 11px; font-family: var(--mono); }
 
+.caveat-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  background: rgba(224,168,63,0.08);
+  border: 1px solid rgba(224,168,63,0.5);
+  border-radius: 2px;
+  color: var(--warning);
+  font-size: 12px;
+}
+.caveat-banner .caveat-icon { font-size: 14px; }
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(6, 1fr);

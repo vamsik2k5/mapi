@@ -185,6 +185,30 @@ Explorer's Source column (`etw`/`fused`/`sysmon`) surface this live — stop
 Sysmon (`sc stop sysmon64`) while the dashboard is running and watch the
 Sysmon badge go stale while ETW-sourced rows keep appearing.
 
+`sensor_health.compute_blind_state()` reduces both sensors' labels to one
+aggregate visibility state — `HEALTHY` / `DEGRADED` / `PARTIALLY_BLIND` /
+`CRITICALLY_BLIND` — surfaced as the dashboard's "Visibility" badge and
+exposed via `/api/summary`'s `blind_state` field. `DEGRADED` means one
+sensor is down but the other still covers process-create visibility;
+`PARTIALLY_BLIND`/`CRITICALLY_BLIND` mean *no* sensor is currently live,
+split by whether any telemetry was ever seen this session — a sensor that
+died mid-run (`PARTIALLY_BLIND`) is a more urgent signal than one that
+never came up at all (`CRITICALLY_BLIND`, e.g. running non-elevated). The
+watchdog thread also logs every transition of this aggregate state (not
+just per-sensor staleness), at a level that escalates with severity, so a
+headless `main.py` run without a dashboard watching it still fails loudly.
+
+When both sensors observe the same PID, the correlator also cross-checks
+one field both of them independently carry: parent PID. If ETW and Sysmon
+disagree about who a process's parent was, that disagreement is logged as
+its own `[TELEMETRY_CONTRADICTION]` line — never silently resolved by
+whichever field the fused-event merge happens to keep — and shows up on
+the dashboard under its own "Telemetry Contradiction" category rather than
+folded into a normal-looking process-create alert. Deliberately scoped to
+ancestry only for now: it's the one field both current kernel sensors
+carry, extend `ProcessCorrelator._check_ancestry_contradiction` once a
+file/network/memory sensor feeds the correlator.
+
 One PID-reuse tradeoff, disclosed rather than hidden: because ETW's
 `CreateTime` and Sysmon's `UtcTime` arrive in different, not reliably
 comparable formats (confirmed by reading `pywintrace`'s source — every ETW
@@ -194,6 +218,114 @@ correlator keys purely on PID rather than `(pid, timestamp)`. This accepts
 the same PID-reuse race window (bounded by `fuse_window`) that
 `heuristic_engine.py`'s `_reset_score_if_pid_reused` already documents
 elsewhere in this codebase as a known, accepted edge case.
+
+### Self-test: proving the pipeline, not just the process
+
+`sensor_health.py`'s heartbeat/blind-state tracking proves a sensor's
+*thread* is alive — it can't prove that thread is actually seeing real
+events. `self_test.py` closes that gap: every `interval_seconds` (default
+300, `config/detection.yml`'s `self_test:` section), it spawns one real,
+inert child process (`cmd.exe /c exit 0` — parent is this agent's own
+process, never an `OFFICE_PARENTS` process, so `heuristic_engine.py`'s
+LOLBin rule structurally cannot fire on it) and polls for up to
+`timeout_seconds` to confirm *that exact PID* was actually reported by
+telemetry. In `web_server.py` it also round-trips a canary line through
+the real logging → `AlertStore` pipeline to prove alert generation itself
+is wired. Failures log `[SELF-TEST] FAILED: ...` at `CRITICAL` (fails
+loudly, per the architectural principle below); results are logged only on
+transition (pass↔fail), like the watchdog's staleness tracking, so a
+healthy pipeline doesn't spam the alert feed every cycle.
+
+Scoped honestly: this only tests what this prototype actually has a
+sensor for — process-create visibility and (dashboard-only) alert
+generation. It makes no claim about file, memory, network, or
+cloud-delivery visibility, because no sensor for those exists here yet.
+
+### Negative-evidence protection: "no activity" vs. "couldn't observe"
+
+A dashboard showing "0 Critical Threats" is easy to misread as "confirmed
+clean" — but if the endpoint is currently blind, it just means nothing was
+seen, not that nothing happened. `sensor_health.negative_evidence_caveat()`
+turns `blind_state` into that exact distinction: `None` only when
+`blind_state` is `HEALTHY` (the counts *are* reliable negative evidence),
+otherwise a short explanation scaled to how blind the endpoint actually is
+— a `DEGRADED` endpoint still has one live sensor, a `CRITICALLY_BLIND` one
+has none at all, and the two get different wording, not one generic
+warning reused everywhere. `web_server.py`'s `/api/summary` exposes both
+`negative_evidence_reliable` (bool) and `visibility_caveat` (the text) —
+the dashboard renders the latter as a banner directly above the alert-count
+tiles it qualifies, hidden entirely when visibility is healthy.
+
+### Failure-injection lab: proving the reaction, not just the happy path
+
+`failure_lab.py` deliberately breaks the telemetry pipeline and checks the
+EDR reacts correctly — detects the failure, records what was lost, changes
+health state, falls back to the surviving sensor, reduces confidence,
+alerts loudly on total loss, and recovers — while measuring how long each
+step took.
+
+```bash
+cd src
+python failure_lab.py                  # all scenarios
+python failure_lab.py sysmon_silence   # selected scenarios
+python failure_lab.py --list
+python failure_lab.py --json report.json
+```
+
+| Scenario | Fault injected |
+|---|---|
+| `sysmon_silence` / `etw_silence` | One sensor goes quiet, the other keeps working |
+| `total_silence` | Both sensors go quiet after telemetry had been flowing |
+| `cold_start_blind` | No sensor ever comes up (e.g. not elevated) |
+| `etw_only_total_loss` | Sysmon not deployed, the only sensor dies mid-run |
+| `queue_flood` | Burst overflows a stalled consumer's bounded queue |
+| `malformed_input` | Garbage fed to both sensor callbacks |
+| `sensor_contradiction` | ETW and Sysmon disagree about a parent PID |
+
+**What is real vs. synthetic.** The ETW/Sysmon callbacks, bounded queues,
+scoring workers, `ProcessCorrelator`, `HeuristicEngine`, `SensorHealth`,
+`watchdog_loop` and the blind-state logic are the production code, unmodified.
+Only the OS event source is synthetic — events are fabricated and fed in
+through the same callbacks the kernel/Event Log would call (with string
+field values, matching what pywintrace really produces). **It is
+software-only and safe**: no service is stopped, no ETW session is touched,
+nothing needs elevation; synthetic PIDs start at 2,000,000,000 (outside the
+real PID range), `mitigate()` is replaced with a recorder, and every
+scenario asserts it was never called and nothing was scored. Because it
+swaps the root logger's handlers to capture the EDR's own output, run it
+standalone, never inside the live dashboard process.
+
+**Measured detection latency** is ≈ the sensor `stale_after` threshold (the
+lab uses 0.4s so it runs fast; production defaults to 60s) plus at most one
+watchdog tick; recovery is near-instant because a heartbeat clears staleness
+immediately. Each scenario reports its own numbers.
+
+**What it found in this codebase** (both fixed, both now guarded by mutation
+tests in `test_failure_lab.py`):
+
+1. Total loss of visibility mid-run (`PARTIALLY_BLIND`) was logged at `ERROR`,
+   which the dashboard displays as only a WARNING — while the never-started
+   case was `CRITICAL`. Both no-sensor-live states now log at `CRITICAL`.
+2. `HeuristicEngine.total_events_seen` never counts events arriving through
+   the correlator's ETW path, so an ETW-only deployment (no Sysmon) that lost
+   its sensor mid-run was reported as `CRITICALLY_BLIND` ("never worked")
+   instead of `PARTIALLY_BLIND`. "Telemetry seen" now also counts any
+   sensor's own heartbeat (`sensor_health.current_blind_state`).
+
+**Known gaps it reports but does not fail on** (real weaknesses, documented
+rather than encoded as expected behavior):
+
+- Event drops from a full queue are logged but do not degrade `blind_state`
+  or trigger the negative-evidence caveat (threat-model items 3 and 5).
+- The Sysmon heartbeat is content-agnostic: a stream of unparseable events
+  keeps that sensor "live" (item 1). The ETW heartbeat is not spoofable this
+  way — the lab verifies it.
+
+**Scope.** It tests what this prototype actually has: process-create
+telemetry from two sensors, the correlator, health/blind-state, and the log
+pipeline. It makes no claim about file, memory, network, or cloud-delivery
+failures because no sensor for those exists here, and it does not stop real
+services — that needs a disposable VM and is a deliberate follow-on.
 
 ## What each detector actually catches
 
@@ -212,8 +344,8 @@ elsewhere in this codebase as a known, accepted edge case.
 | Crypto-clipper / webhook / paste-site / IP-literal C2 strings | `static_scanner.py` | T1027, T1102, T1071 |
 | Imphash match against known-family intel | `static_scanner.py` | Family clustering (see [Threat intel sync](#threat-intel-sync-malwarebazaar)) |
 | Execution from staging dirs (`Temp`, `Public`) | `heuristic_engine.py` | T1036 / T1105 |
-| Defender-tamper command lines | `heuristic_engine.py` | T1562.001 |
-| Obfuscated/download-execute PowerShell | `heuristic_engine.py` | T1059.001, T1027 |
+| Defender-tamper command lines (only on processes that execute them: PowerShell, `cmd`, `sc`, `net`/`net1`, `taskkill`, `reg`) | `heuristic_engine.py` | T1562.001 |
+| Obfuscated/download-execute PowerShell (PowerShell hosts only: `powershell.exe`/`pwsh.exe`, or a renamed copy via Sysmon's `OriginalFileName`) | `heuristic_engine.py` | T1059.001, T1027 |
 | Office app → LOLBin child process | `heuristic_engine.py` | T1204.002 |
 | LSASS credential access (real bitmask check) | `heuristic_engine.py` | T1003.001 |
 | Process hollowing via `svchost.exe` access | `heuristic_engine.py` | T1055.012 |
@@ -534,8 +666,9 @@ meaningfully larger change than this one.
 ## Configuration
 
 `config/detection.yml` holds the numeric tunables `src/detection_config.py`
-loads at startup — decay rate, the warning/critical thresholds, and the
-ransomware burst window/count. **Not** configurable here, on purpose: the
+loads at startup — decay rate, the warning/critical thresholds, the
+ransomware burst window/count, the correlator's fuse window, and the
+self-test interval/timeout. **Not** configurable here, on purpose: the
 protected-process floor, LSASS/hollowing access-mask bitmasks, and
 Defender-tamper/PowerShell-abuse pattern lists all stay hardcoded in
 `heuristic_engine.py`, so a bad or malicious edit to this file can never
@@ -552,6 +685,11 @@ thresholds:
 ransomware:
   file_event_window_seconds: 20
   file_event_threshold: 60
+correlator:
+  fuse_window_seconds: 2.0
+self_test:
+  interval_seconds: 300
+  timeout_seconds: 15
 ```
 
 ## Workflows
@@ -639,7 +777,9 @@ mal_project/
 │   ├── telemetry_monitor.py  Sysmon EvtSubscribe wiring
 │   ├── etw_monitor.py       Raw ETW Kernel-Process sensor (pywintrace) - independent of Sysmon
 │   ├── process_correlator.py Fuses matching ETW + Sysmon process-create events (provisional/fused)
-│   ├── sensor_health.py     Per-sensor heartbeat tracking + observe-only staleness watchdog
+│   ├── sensor_health.py     Per-sensor heartbeat tracking + observe-only staleness watchdog + aggregate blind-state
+│   ├── self_test.py         Periodic benign self-test - proves the telemetry/alert pipeline actually delivers, not just that a thread is alive
+│   ├── failure_lab.py       Software-only failure-injection lab - breaks the telemetry pipeline on purpose and verifies detection/fallback/recovery
 │   ├── module_inspector.py Active live-process module sweep
 │   ├── rule_engine.py       Additive YAML rule pack (rules/custom/*.yml) - see Custom detection rules
 │   ├── detection_config.py  Config-driven tunables (config/detection.yml) - decay/thresholds/ransomware window
@@ -706,6 +846,9 @@ mal_project/
 - **Scoring is per-PID / per-file-hash, not per-ProcessGuid.** A PID-reuse
   guard (comparing OS process start time) mitigates the most common failure
   mode, but Sysmon's `ProcessGuid` field would be a more robust key long-term.
+- **The PowerShell-abuse rule only inspects PowerShell hosts** (`powershell.exe`, `pwsh.exe`, or any image whose Sysmon `OriginalFileName` says so). It used to match every process, which made the bare `-e ` pattern flag any lowercased `grep -E`/`sed -e`/`node -e` and any wrapper merely *quoting* those words. The trade-off: a renamed copy of PowerShell is only caught if Sysmon supplies `OriginalFileName` (Sysmon 10+), and a `cmd.exe /c "powershell -enc ..."` wrapper is not itself flagged — the `powershell.exe` child it spawns is.
+- **The Defender-tamper rule only inspects processes that execute such commands** (PowerShell, `cmd.exe`, `sc.exe`, `net.exe`/`net1.exe`, `taskkill.exe`, `reg.exe`, matched by image name or Sysmon `OriginalFileName`). It used to inspect every process, and because one hit scores +90 (above the 80 mitigation threshold on its own) any tool whose command line merely *contained* a pattern - `grep`, `git commit -m`, `python -c`, an editor, a `bash -c` wrapper - was suspended and terminated. Launchers that only pass a command along (`wmic`, `schtasks`, `mshta`, ...) are not inspected themselves; the interpreter/utility process they spawn is. Matching also ignores double quotes and extra whitespace, so `"C:\WINDOWS\system32\sc.exe" stop windefend` (how PowerShell launches it) matches like `sc stop windefend`. A renamed copy of a *utility* (`sc.exe` -> `x.exe`) is only caught if the pattern doesn't embed its name; renamed interpreters and `reg.exe` are.
+- **Benign commands on those hosts can still trigger the Defender-tamper rule and be mitigated**: it matches text, not intent. Confirmed still flagged: a read-only `Get-MpPreference | Select DisableRealtimeMonitoring`, *re-enabling* protection (`-DisableRealtimeMonitoring $false`), `Remove-MpPreference` (which tightens Defender), and a PowerShell/`cmd` command line that merely quotes a pattern (`Select-String 'set-mppreference' ...`, `echo sc stop windefend`). Fixing these needs a policy decision (an exclusion an attacker could game, or making interpreter-only matches non-lethal), so it is left as-is rather than guessed at.
 - **`mitigate()`'s "simulated memory snapshot" at score ≥ 50 does nothing
   yet** — it's a log line, not an actual forensic capture.
 - No persistence/config file yet — thresholds, decay rate, and the

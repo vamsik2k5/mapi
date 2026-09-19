@@ -34,8 +34,12 @@ from etw_monitor import start_etw_monitor
 from module_inspector import ModuleInspector
 from process_correlator import ProcessCorrelator
 from rule_engine import RuleEngine
-from sensor_health import SensorHealth, watchdog_loop
+from sensor_health import (
+    SensorHealth, watchdog_loop, sensor_label, current_blind_state,
+    negative_evidence_caveat, BLIND_STATE_HEALTHY,
+)
 from detection_config import load_config
+from self_test import self_test_loop
 from process_tracker import ProcessTracker
 import dashboard_data as dd
 
@@ -164,6 +168,15 @@ class Backend:
         self.process_activity.add(event_id, data)
         self.process_tracker.add(event_id, data)
 
+    def _pid_seen(self, pid):
+        """self_test.py's pid_seen_fn for this entrypoint - reuses
+        ProcessActivityStore (every ProcessCreate event, scored or not)
+        rather than a new observer, since it already records exactly this.
+        str() on both sides because a pid recorded from Sysmon's XML text
+        and one from ETW's decoded int field can differ in type for the
+        same real PID."""
+        return any(str(row.get("pid")) == str(pid) for row in self.process_activity.snapshot())
+
     def start(self):
         logging.info("[*] Starting Static Ingress Scanner...")
         StaticScanner(self.engine, BINARIES_PATH, rule_engine=self.rules).scan()
@@ -173,30 +186,55 @@ class Backend:
         self.correlator.start()
         self._sysmon_handle = start_monitor(self.engine, on_heartbeat=self.sysmon_health.touch)
         self._etw_handle = start_etw_monitor(self.engine, on_heartbeat=self.etw_health.touch, correlator=self.correlator)
-        threading.Thread(target=watchdog_loop, args=([self.sysmon_health, self.etw_health],), daemon=True).start()
+        threading.Thread(
+            target=watchdog_loop,
+            args=([self.sysmon_health, self.etw_health],),
+            kwargs={"blind_state_fn": self._blind_state},
+            daemon=True,
+        ).start()
 
         threading.Thread(target=self._module_sweep_loop, daemon=True).start()
+
+        # Benign, periodic self-test (see self_test.py) - proves the
+        # telemetry pipeline actually delivers real events end-to-end, and
+        # (only here, since this is the entrypoint with an AlertStore) that
+        # the alert-generation pipeline is actually wired.
+        threading.Thread(
+            target=self_test_loop,
+            args=(self._pid_seen, self.alert_store),
+            kwargs={
+                "interval": self.config['self_test']['interval_seconds'],
+                "timeout": self.config['self_test']['timeout_seconds'],
+            },
+            daemon=True,
+        ).start()
 
     def _module_sweep_loop(self):
         while True:
             time.sleep(MODULE_SWEEP_INTERVAL_SECONDS)
             self.inspector.sweep()
 
-    def _sensor_label(self, handle, health):
-        """'unavailable' means the sensor never came up at startup (e.g.
-        EvtSubscribe/ETW trace failed) - permanent for this run. 'stale'/
-        'live' come from SensorHealth's heartbeat, computed fresh on every
-        call so a sensor dying mid-run (e.g. `sc stop sysmon64`) is
-        reflected here without needing sensor_status to be re-set anywhere."""
-        if not handle:
-            return "unavailable"
-        return "stale" if health.is_stale() else "live"
+    def _blind_state(self):
+        """Aggregate visibility state across both behavioral sensors (see
+        sensor_health.compute_blind_state) - computed fresh on every call,
+        same as the per-sensor labels below, so it reflects a sensor dying
+        (or recovering) mid-run with no state to re-set anywhere."""
+        return current_blind_state(
+            [(self._sysmon_handle, self.sysmon_health), (self._etw_handle, self.etw_health)],
+            self.engine.total_events_seen,
+        )
 
     def summary(self):
         alerts = self.alert_store.snapshot()
         last_event = self.engine.last_event_time
-        sysmon_label = self._sensor_label(self._sysmon_handle, self.sysmon_health)
-        etw_label = self._sensor_label(self._etw_handle, self.etw_health)
+        # 'unavailable' means the sensor never came up at startup (e.g.
+        # EvtSubscribe/ETW trace failed) - permanent for this run. 'stale'/
+        # 'live' come from SensorHealth's heartbeat, computed fresh on every
+        # call so a sensor dying mid-run (e.g. `sc stop sysmon64`) is
+        # reflected here without needing sensor_status to be re-set anywhere.
+        sysmon_label = sensor_label(self._sysmon_handle, self.sysmon_health)
+        etw_label = sensor_label(self._etw_handle, self.etw_health)
+        blind_state = self._blind_state()
         return {
             "hostname": socket.gethostname(),
             "session_start": self.session_start,
@@ -213,6 +251,18 @@ class Backend:
             # existing badge rendering.
             "sysmon_state": sysmon_label,
             "etw_state": etw_label,
+            # Aggregate visibility state (see sensor_health.compute_blind_state)
+            # - HEALTHY/DEGRADED/PARTIALLY_BLIND/CRITICALLY_BLIND, driven by
+            # telemetry integrity rather than just "is the process running".
+            "blind_state": blind_state,
+            # Negative-evidence protection (threat-model item #19): whether
+            # the alert counts below can actually be read as "no activity
+            # observed" (only true when blind_state is HEALTHY) versus
+            # "activity could not be observed" - and a human-readable reason
+            # why, for the dashboard to show directly next to those counts
+            # rather than making a viewer infer it from blind_state alone.
+            "negative_evidence_reliable": blind_state == BLIND_STATE_HEALTHY,
+            "visibility_caveat": negative_evidence_caveat(blind_state),
             "thresholds": self.config['thresholds'],
             "total_alerts": len(alerts),
             "critical_count": sum(1 for a in alerts if a["severity"] == "CRITICAL"),

@@ -20,12 +20,18 @@
     <div></div>
     <div class="topbar-right">
       <span id="sensorStatus" class="badge badge-neutral">Sensor: connecting...</span>
+      <span id="blindState" class="badge badge-neutral">Visibility: connecting...</span>
       <button id="isolateBtn" class="btn btn-danger-outline">Isolate Host</button>
     </div>
   </header>
 </div>
 
 <main>
+  <div id="visibilityCaveat" class="caveat-banner" style="display:none">
+    <span class="caveat-icon">⚠</span>
+    <span id="visibilityCaveatText"></span>
+  </div>
+
   <section class="gauge-row">
     <div class="gauge-card" id="gaugeSensorHealth">
       <svg width="72" height="72" viewBox="0 0 72 72">

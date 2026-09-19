@@ -138,6 +138,103 @@ def test_rules_endpoint_reflects_rule_engine_summary():
     assert any(r['id'] == 'r1' for r in summary)
 
 
+def test_backend_surfaces_telemetry_contradiction_as_a_categorized_alert():
+    # End-to-end through the real pipeline Backend wires up: correlator's
+    # logging.warning() -> root logger -> AlertLogHandler -> AlertStore ->
+    # dashboard_data.categorize(), with no mocking of any of those hops.
+    backend = ws.Backend()
+    backend.correlator.fuse_window = 0.01
+    backend.correlator.submit_etw(4242, 1, "evil.exe", "t")       # parent PID 1
+    backend.correlator.submit_sysmon({'ProcessId': 4242, 'ParentProcessId': 999, 'Image': 'evil.exe'}, "t")
+    time.sleep(0.02)
+    backend.correlator._gc_once()
+    alerts = backend.alert_store.snapshot()
+    contradiction_alerts = [a for a in alerts if a["category"] == "Telemetry Contradiction"]
+    assert len(contradiction_alerts) == 1
+    assert "PID 4242" in contradiction_alerts[0]["message"]
+    assert contradiction_alerts[0]["severity"] == "WARNING"
+
+
+def test_backend_summary_blind_state_critically_blind_before_start():
+    # Backend() alone (start() never called) is exactly what a fresh
+    # dashboard process looks like before either sensor has come up -
+    # zero events ever seen, both handles still None.
+    backend = ws.Backend()
+    assert backend.summary()["blind_state"] == "CRITICALLY_BLIND"
+
+
+def test_backend_summary_blind_state_healthy_when_both_sensors_live():
+    backend = ws.Backend()
+    backend._sysmon_handle = object()
+    backend._etw_handle = object()
+    backend.sysmon_health.touch()
+    backend.etw_health.touch()
+    assert backend.summary()["blind_state"] == "HEALTHY"
+
+
+def test_backend_summary_blind_state_degraded_when_one_sensor_down():
+    backend = ws.Backend()
+    backend._sysmon_handle = object()
+    backend._etw_handle = object()
+    backend.sysmon_health.touch()
+    # etw_health never touched -> stale, sysmon still live
+    assert backend.summary()["blind_state"] == "DEGRADED"
+
+
+def test_backend_summary_blind_state_partially_blind_once_events_were_seen():
+    backend = ws.Backend()
+    backend._sysmon_handle = object()
+    backend._etw_handle = object()
+    backend.engine.total_events_seen = 1  # telemetry flowed at some point this session
+    # neither sensor touched -> both stale, no sensor currently live
+    assert backend.summary()["blind_state"] == "PARTIALLY_BLIND"
+
+
+def test_backend_summary_blind_state_recovers_when_sensor_comes_back():
+    backend = ws.Backend()
+    backend._sysmon_handle = object()
+    backend._etw_handle = object()
+    assert backend.summary()["blind_state"] == "CRITICALLY_BLIND"
+    backend.sysmon_health.touch()
+    backend.etw_health.touch()
+    assert backend.summary()["blind_state"] == "HEALTHY", "must be recomputed fresh on every summary() call"
+
+
+def test_backend_summary_negative_evidence_reliable_only_when_healthy():
+    backend = ws.Backend()
+    backend._sysmon_handle = object()
+    backend._etw_handle = object()
+    # CRITICALLY_BLIND (nothing touched yet) - "0 alerts" must not be
+    # reported as trustworthy.
+    summary = backend.summary()
+    assert summary["negative_evidence_reliable"] is False
+    assert summary["visibility_caveat"] is not None
+
+    backend.sysmon_health.touch()
+    backend.etw_health.touch()
+    summary = backend.summary()
+    assert summary["negative_evidence_reliable"] is True
+    assert summary["visibility_caveat"] is None
+
+
+def test_backend_summary_visibility_caveat_distinguishes_degraded_from_critically_blind():
+    backend = ws.Backend()
+    backend._sysmon_handle = object()
+    backend._etw_handle = object()
+    backend.sysmon_health.touch()  # sysmon live, etw never touched -> DEGRADED
+    degraded_summary = backend.summary()
+    assert degraded_summary["blind_state"] == "DEGRADED"
+
+    backend2 = ws.Backend()
+    backend2._sysmon_handle = object()
+    backend2._etw_handle = object()  # neither touched -> CRITICALLY_BLIND
+    critical_summary = backend2.summary()
+    assert critical_summary["blind_state"] == "CRITICALLY_BLIND"
+
+    assert degraded_summary["visibility_caveat"] != critical_summary["visibility_caveat"], \
+        "a partially-redundant DEGRADED state and total CRITICALLY_BLIND must not get the same caveat"
+
+
 def test_dashboard_server_refuses_to_share_a_port():
     # The bug this guards against: http.server's default
     # allow_reuse_address=True let two separate elevated instances bind
@@ -158,5 +255,13 @@ if __name__ == "__main__":
     test_backend_wires_engine_events_into_process_activity_and_tracker()
     test_backend_constructs_rule_engine_and_config()
     test_rules_endpoint_reflects_rule_engine_summary()
+    test_backend_surfaces_telemetry_contradiction_as_a_categorized_alert()
+    test_backend_summary_blind_state_critically_blind_before_start()
+    test_backend_summary_blind_state_healthy_when_both_sensors_live()
+    test_backend_summary_blind_state_degraded_when_one_sensor_down()
+    test_backend_summary_blind_state_partially_blind_once_events_were_seen()
+    test_backend_summary_blind_state_recovers_when_sensor_comes_back()
+    test_backend_summary_negative_evidence_reliable_only_when_healthy()
+    test_backend_summary_visibility_caveat_distinguishes_degraded_from_critically_blind()
     test_dashboard_server_refuses_to_share_a_port()
     print("OK")

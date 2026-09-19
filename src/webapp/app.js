@@ -136,6 +136,35 @@ function renderSummary(summary) {
     badgeClass = "badge-warn";
   }
   badge.className = "badge " + badgeClass;
+
+  // Aggregate visibility state (see sensor_health.compute_blind_state) -
+  // distinct from the per-sensor badge above: two sensors can each be
+  // individually "down" for different reasons (one never started, one went
+  // stale mid-run) while this collapses that into one telemetry-integrity
+  // signal that detection confidence should key off of.
+  const BLIND_STATE_CLASS = {
+    HEALTHY: "badge-ok",
+    DEGRADED: "badge-warn",
+    PARTIALLY_BLIND: "badge-off",
+    CRITICALLY_BLIND: "badge-off",
+  };
+  const blindBadge = document.getElementById("blindState");
+  blindBadge.textContent = `Visibility: ${summary.blind_state || "?"}`;
+  blindBadge.className = "badge " + (BLIND_STATE_CLASS[summary.blind_state] || "badge-neutral");
+
+  // Negative-evidence protection (see sensor_health.negative_evidence_caveat):
+  // the stat tiles above (Total Alerts/Critical/Warnings) are, in the end,
+  // just counts of what was observed - they say nothing about what wasn't.
+  // Surface that distinction right here rather than let a viewer read
+  // "0 critical" as "confirmed clean" when visibility is actually degraded.
+  const caveatEl = document.getElementById("visibilityCaveat");
+  const caveatTextEl = document.getElementById("visibilityCaveatText");
+  if (summary.visibility_caveat) {
+    caveatTextEl.textContent = summary.visibility_caveat;
+    caveatEl.style.display = "flex";
+  } else {
+    caveatEl.style.display = "none";
+  }
 }
 
 // ---- charts ---------------------------------------------------------------

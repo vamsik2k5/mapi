@@ -189,7 +189,14 @@ Sysmon badge go stale while ETW-sourced rows keep appearing.
 aggregate visibility state — `HEALTHY` / `DEGRADED` / `PARTIALLY_BLIND` /
 `CRITICALLY_BLIND` — surfaced as the dashboard's "Visibility" badge and
 exposed via `/api/summary`'s `blind_state` field. `DEGRADED` means one
-sensor is down but the other still covers process-create visibility;
+sensor is down *or dropping events* but another still delivers. A sensor
+is "lossy" for 60s after its bounded queue last overflowed: alive and
+delivering, but its picture of the endpoint has holes (the dashboard
+shows how many events were dropped, and `/api/summary` exposes
+`sysmon_dropped_events` / `etw_dropped_events`). A sensor's heartbeat also
+only counts an event it could actually use — a Sysmon event with a numeric
+`EventID`, an ETW `ProcessStart` with a `ProcessID` — so a stream of
+malformed events can't keep a silent sensor looking alive.
 `PARTIALLY_BLIND`/`CRITICALLY_BLIND` mean *no* sensor is currently live,
 split by whether any telemetry was ever seen this session — a sensor that
 died mid-run (`PARTIALLY_BLIND`) is a more urgent signal than one that
@@ -300,7 +307,7 @@ lab uses 0.4s so it runs fast; production defaults to 60s) plus at most one
 watchdog tick; recovery is near-instant because a heartbeat clears staleness
 immediately. Each scenario reports its own numbers.
 
-**What it found in this codebase** (both fixed, both now guarded by mutation
+**What it found in this codebase** (all fixed, all now guarded by mutation
 tests in `test_failure_lab.py`):
 
 1. Total loss of visibility mid-run (`PARTIALLY_BLIND`) was logged at `ERROR`,
@@ -311,15 +318,23 @@ tests in `test_failure_lab.py`):
    its sensor mid-run was reported as `CRITICALLY_BLIND` ("never worked")
    instead of `PARTIALLY_BLIND`. "Telemetry seen" now also counts any
    sensor's own heartbeat (`sensor_health.current_blind_state`).
+3. Event drops from a full queue were only logged: 349 ETW events could be
+   lost while `blind_state` stayed `HEALTHY`. Each drop is now recorded on
+   the sensor, which turns `lossy` (→ `DEGRADED`, the caveat banner, and a
+   `[WATCHDOG] ... dropping events` log naming the count) until the drops
+   stop. The lab also checks the drop counter agrees with the log record.
+4. The Sysmon heartbeat was content-agnostic: unparseable events kept a
+   silent sensor "live". It now needs a numeric `EventID` (a cheap pattern
+   check on the callback thread — checked against 600 real events from four
+   Windows channels, including classic `<EventID Qualifiers='0'>` events).
+   The ETW equivalent, a `ProcessStart` with no `ProcessID`, is closed too.
+   Both were originally reported as "known gaps" by the lab itself.
 
-**Known gaps it reports but does not fail on** (real weaknesses, documented
-rather than encoded as expected behavior):
-
-- Event drops from a full queue are logged but do not degrade `blind_state`
-  or trigger the negative-evidence caveat (threat-model items 3 and 5).
-- The Sysmon heartbeat is content-agnostic: a stream of unparseable events
-  keeps that sensor "live" (item 1). The ETW heartbeat is not spoofable this
-  way — the lab verifies it.
+**Known gaps.** A scenario can record a weakness it observed with
+`lab.gap(...)`: it is reported as `KNOWN GAP` but does not fail the run, so
+real weaknesses are documented rather than encoded as expected behavior.
+None are open right now — the two it originally reported are fixed and
+checked (see above).
 
 **Scope.** It tests what this prototype actually has: process-create
 telemetry from two sensors, the correlator, health/blind-state, and the log

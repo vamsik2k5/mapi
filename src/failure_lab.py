@@ -211,7 +211,7 @@ class Lab:
     restores) the log capture and the Event Log shim."""
 
     def __init__(self, result, stale_after=0.4, watchdog_interval=0.1, fuse_window=0.15,
-                 event_interval=0.05, etw_queue_maxsize=etw_monitor.EVENT_QUEUE_MAXSIZE):
+                 event_interval=0.05, etw_queue_maxsize=etw_monitor.EVENT_QUEUE_MAXSIZE, drop_window=0.6):
         self.result = result
         self.stale_after = stale_after
         self.watchdog_interval = watchdog_interval
@@ -221,6 +221,8 @@ class Lab:
 
         self.detect_bound = stale_after + SLACK_SECONDS
         self.log_bound = stale_after + watchdog_interval + SLACK_SECONDS
+        self.drop_window = drop_window
+        self.recover_bound = drop_window + SLACK_SECONDS
 
         self.log = LogCapture()
         self.mitigations = []
@@ -241,8 +243,8 @@ class Lab:
         self._saved_level = None
         self._saved_evtlog = None
 
-        self.sysmon_health = SensorHealth("sysmon", stale_after=stale_after)
-        self.etw_health = SensorHealth("etw", stale_after=stale_after)
+        self.sysmon_health = SensorHealth("sysmon", stale_after=stale_after, drop_window=drop_window)
+        self.etw_health = SensorHealth("etw", stale_after=stale_after, drop_window=drop_window)
         self.sysmon_handle = None
         self.etw_handle = None
         self.engine = None
@@ -424,7 +426,8 @@ class Lab:
             self.etw_offered += 1
         started = time.monotonic()
         try:
-            etw_monitor._on_etw_event(event_tuple, self.etw_queue, on_heartbeat=self.etw_health.touch)
+            etw_monitor._on_etw_event(event_tuple, self.etw_queue, on_heartbeat=self.etw_health.touch,
+                                      on_drop=self.etw_health.record_drop)
         except Exception as e:
             self._record_callback_exception("etw", e)
         finally:
@@ -436,6 +439,7 @@ class Lab:
             telemetry_monitor.on_sysmon_event(
                 telemetry_monitor.win32evtlog.EvtSubscribeActionDeliver,
                 self.sysmon_queue, xml, on_heartbeat=self.sysmon_health.touch,
+                on_drop=self.sysmon_health.record_drop,
             )
         except Exception as e:
             self._record_callback_exception("sysmon", e)
@@ -664,10 +668,39 @@ def _queue_flood(lab):
               f"qsize {lab.etw_queue.qsize()} / max {lab.etw_queue_maxsize}")
     lab.check("non-blocking: the ETW callback never stalled behind the blocked consumer",
               lab.max_callback_s < 0.25, f"slowest callback {lab.max_callback_s * 1000:.1f}ms")
-    state_during_flood = lab.blind_state()
+
+    dt = lab.wait_state(BLIND_STATE_DEGRADED, lab.detect_bound)
+    lab.check("detected: queue overflow degrades the blind state to DEGRADED", dt is not None,
+              f"observed {lab.blind_state()}")
+    lab.check("labelled correctly: the sensor is dropping events, not stale (it is alive)",
+              lab.etw_health.is_lossy() and not lab.etw_health.is_stale(),
+              f"lossy={lab.etw_health.is_lossy()} stale={lab.etw_health.is_stale()}")
+
+    lossy_log = lab.wait_log("[WATCHDOG] etw sensor dropping events", t0, lab.log_bound)
+    lab.check("recorded: watchdog names the sensor that is dropping events and how many",
+              lossy_log is not None and "dropped so far" in lossy_log[2],
+              lossy_log[2] if lossy_log else f"not observed within {lab.log_bound:.2f}s")
+    transition = lab.wait_log("[BLIND-STATE] HEALTHY -> DEGRADED", t0, lab.log_bound)
+    lab.check("alerted: DEGRADED transition logged at WARNING",
+              transition is not None and transition[1] == logging.WARNING,
+              f"level {transition[1] if transition else None}")
+    lab.check("confidence reduced: negative-evidence caveat is active",
+              negative_evidence_caveat(lab.blind_state()) is not None)
+
+    # The generator keeps running so both sensors stay live while the drops
+    # age out of the window - recovery is measured from the moment the
+    # consumer is released.
+    lab.consumer.release()
+    t1 = time.monotonic()
+    dt = lab.wait_state(BLIND_STATE_HEALTHY, lab.recover_bound)
+    lab.check("recovered: HEALTHY once the consumer catches up and drops stop", dt is not None,
+              _lat(dt, lab.recover_bound) if dt is not None else f"observed {lab.blind_state()}")
+    lab.metric("time_to_recover_s", dt)
+    recovery = lab.wait_log("[BLIND-STATE] DEGRADED -> HEALTHY", t1, lab.log_bound + lab.drop_window)
+    lab.check("recovery logged at INFO", recovery is not None and recovery[1] == logging.INFO,
+              f"level {recovery[1] if recovery else None}")
 
     lab.stop_source()
-    lab.consumer.release()
     settled = lab.wait_settled(5.0)
     lab.check("recovered: consumer drains the queue once unstalled", settled is not None)
 
@@ -677,17 +710,15 @@ def _queue_flood(lab):
     lab.check("recorded: overflow drops were logged", dropped > 0, f"{dropped} drop warnings")
     lab.check("accounting: every offered event was either processed or logged as dropped",
               offered == processed + dropped, f"offered={offered} processed={processed} dropped={dropped}")
+    lab.check("accounting: the sensor's own drop counter agrees with the log record",
+              lab.etw_health.drops_total() == dropped,
+              f"counter={lab.etw_health.drops_total()} logged={dropped}")
     lab.metric("events_offered", offered)
     lab.metric("events_dropped", dropped)
 
     pid = lab.emit_etw_only()
     lab.check("recovered: a post-flood event is dispatched normally",
               lab.wait_for(lambda: lab.was_dispatched(pid), 3.0) is not None)
-
-    if dropped > 0 and state_during_flood == BLIND_STATE_HEALTHY:
-        lab.gap(f"{dropped} ETW events were dropped under overload while blind_state stayed HEALTHY: "
-                "queue loss is only logged, it does not degrade the health state or trigger the "
-                "negative-evidence caveat (threat-model items 3 and 5)")
 
 
 @scenario("malformed_input", "Malformed events are fed to both sensor callbacks")
@@ -696,9 +727,14 @@ def _malformed_input(lab):
     if not _healthy_baseline(lab):
         return
 
-    etw_garbage = [None, "garbage", (1,), (1, "not-a-dict"), (1, {}), (1, {"Task Name": "ImageLoad"})]
+    # The last ETW item is a ProcessStart-shaped event with no ProcessID: it
+    # passes the task filter but is unusable.
+    etw_garbage = [None, "garbage", (1,), (1, "not-a-dict"), (1, {}), (1, {"Task Name": "ImageLoad"}),
+                   (1, {"Task Name": "ProcessStart"})]
     xml_garbage = ["<Event>", "not xml at all", "",
-                   '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System/></Event>']
+                   '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System/></Event>',
+                   '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
+                   "<System><EventID>abc</EventID></System></Event>"]  # namespaced, so the engine reaches int('abc')
     t0 = time.monotonic()
     for item in etw_garbage:
         lab.deliver_etw(item)
@@ -706,18 +742,21 @@ def _malformed_input(lab):
         lab.deliver_sysmon(item)
 
     etw_errors = lambda: lab.log.count("[ETW] Error extracting fields", since=t0)
+    worker_errors = lambda: lab.log.count("[ETW] Scoring worker failed", since=t0)
     xml_errors = lambda: lab.log.count("[ERROR] Parsing event XML failed", since=t0)
-    lab.wait_for(lambda: etw_errors() >= 4 and xml_errors() >= 3, 3.0)
+    lab.wait_for(lambda: etw_errors() >= 4 and xml_errors() >= 4 and worker_errors() >= 1, 3.0)
     lab.check("recorded: malformed ETW input is logged, not silently swallowed", etw_errors() >= 4,
               f"{etw_errors()} ETW extraction errors logged")
-    lab.check("recorded: malformed Sysmon XML is logged, not silently swallowed", xml_errors() >= 3,
+    lab.check("recorded: an unusable ProcessStart (no ProcessID) is logged as a scoring error",
+              worker_errors() >= 1, f"{worker_errors()} worker errors logged")
+    lab.check("recorded: malformed Sysmon XML is logged, not silently swallowed", xml_errors() >= 4,
               f"{xml_errors()} XML parse errors logged")
 
     pid = lab.emit_process()
     lab.check("resilient: valid events are still processed after malformed input",
               lab.wait_for(lambda: lab.was_dispatched(pid), 3.0) is not None)
 
-    # A silenced ETW sensor must go stale even while malformed events keep
+    # A silenced sensor must go stale even while malformed events keep
     # arriving - garbage must not masquerade as liveness.
     lab.silence("etw")
     garbage_stream = itertools.cycle(etw_garbage)
@@ -729,16 +768,21 @@ def _malformed_input(lab):
               lab.etw_health.is_stale() and lab.blind_state() == BLIND_STATE_DEGRADED,
               f"etw stale={lab.etw_health.is_stale()}, state={lab.blind_state()}")
     lab.resume("etw")
-    lab.wait_state(BLIND_STATE_HEALTHY, lab.detect_bound)
+    lab.check("recovered: HEALTHY once valid ETW events return",
+              lab.wait_state(BLIND_STATE_HEALTHY, lab.detect_bound) is not None)
 
     lab.silence("sysmon")
+    garbage_stream = itertools.cycle(xml_garbage)
     end = time.monotonic() + lab.stale_after + 0.6
     while time.monotonic() < end:
-        lab.deliver_sysmon("<Event>")
+        lab.deliver_sysmon(next(garbage_stream))
         time.sleep(0.02)
-    if not lab.sysmon_health.is_stale():
-        lab.gap("Sysmon heartbeat is content-agnostic: a stream of unparseable events keeps the sensor "
-                "'live' (blind_state stays HEALTHY) while no valid telemetry is flowing (threat-model item 1)")
+    lab.check("integrity: malformed Sysmon events cannot keep a silent Sysmon sensor 'live'",
+              lab.sysmon_health.is_stale() and lab.blind_state() == BLIND_STATE_DEGRADED,
+              f"sysmon stale={lab.sysmon_health.is_stale()}, state={lab.blind_state()}")
+    lab.resume("sysmon")
+    lab.check("recovered: HEALTHY once valid Sysmon events return",
+              lab.wait_state(BLIND_STATE_HEALTHY, lab.detect_bound) is not None)
 
 
 @scenario("sensor_contradiction", "ETW and Sysmon disagree about a process's parent")

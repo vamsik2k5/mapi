@@ -6,6 +6,7 @@ Run: python test_failure_lab.py"""
 import json
 import logging
 import os
+import re
 import tempfile
 
 import psutil
@@ -37,10 +38,33 @@ def test_scenarios_record_detection_latency_metrics():
     assert 0 < latency <= 0.4 + fl.SLACK_SECONDS
 
 
-def test_lab_documents_gaps_without_failing_on_them():
-    result = fl.run_scenario("queue_flood")
+def test_lab_reports_a_gap_without_failing_the_scenario():
+    # The mechanism for documenting a weakness the lab observed but that isn't
+    # (yet) expected to be fixed: reported, but never a failure.
+    def _observes_a_weakness(lab):
+        lab.start(sysmon=False, etw=False, source=False)
+        lab.check("a passing check", True)
+        lab.gap("something the lab observed that is not yet handled")
+
+    fl.SCENARIOS["_gap_demo"] = ("scenario that documents a gap", _observes_a_weakness, {})
+    try:
+        result = fl.run_scenario("_gap_demo")
+    finally:
+        del fl.SCENARIOS["_gap_demo"]
     assert result.passed
-    assert any("blind_state stayed HEALTHY" in g for g in result.gaps)
+    assert result.gaps == ["something the lab observed that is not yet handled"]
+    assert "KNOWN GAP: something the lab observed" in fl.format_report([result])
+
+
+def test_the_two_original_gaps_stay_closed():
+    # The lab first reported these as known gaps: queue drops left blind_state
+    # HEALTHY, and garbage Sysmon events kept a silent sensor "live". Both are
+    # fixed and now checked (queue_flood / malformed_input) - not merely
+    # documented - so neither may reappear as a gap or a failure.
+    for name in ("queue_flood", "malformed_input"):
+        result = fl.run_scenario(name)
+        assert result.passed, f"{name}: {_failed_checks(result)}"
+        assert result.gaps == [], f"{name} reports a gap again: {result.gaps}"
 
 
 # ---- mutation tests: the lab must notice a broken product --------------------
@@ -67,6 +91,31 @@ def test_mutation_total_loss_logged_below_critical_is_caught():
         sh._BLIND_STATE_LOG_LEVEL[sh.BLIND_STATE_PARTIALLY_BLIND] = original
     assert not result.passed
     assert "alerted: total loss of behavioral visibility is logged at CRITICAL" in _failed_checks(result)
+
+
+def test_mutation_dropped_events_ignored_by_health_is_caught():
+    # regression guard for gap 1: queue overflow must degrade the health state
+    original = sh.SensorHealth.record_drop
+    sh.SensorHealth.record_drop = lambda self: None
+    try:
+        result = fl.run_scenario("queue_flood")
+    finally:
+        sh.SensorHealth.record_drop = original
+    assert not result.passed
+    assert "detected: queue overflow degrades the blind state to DEGRADED" in _failed_checks(result)
+
+
+def test_mutation_unvalidated_sysmon_heartbeat_is_caught():
+    # regression guard for gap 2: a heartbeat that ignores event content lets
+    # garbage keep a silent Sysmon sensor "live"
+    original = telemetry_monitor._EVENT_ID_RE
+    telemetry_monitor._EVENT_ID_RE = re.compile("")  # matches anything, like the old content-agnostic heartbeat
+    try:
+        result = fl.run_scenario("malformed_input")
+    finally:
+        telemetry_monitor._EVENT_ID_RE = original
+    assert not result.passed
+    assert "integrity: malformed Sysmon events cannot keep a silent Sysmon sensor 'live'" in _failed_checks(result)
 
 
 def test_mutation_sensor_heartbeat_ignored_for_ever_seen_is_caught():

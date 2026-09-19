@@ -80,7 +80,12 @@ function renderSensorHealthGauge(summary) {
     document.getElementById("sensorHealthText"),
     fraction, `${liveCount}/2`, zone
   );
-  document.getElementById("sensorHealthSub").textContent = `Sysmon: ${summary.sysmon_state || "?"} · ETW: ${summary.etw_state || "?"}`;
+  let sub = `Sysmon: ${summary.sysmon_state || "?"} · ETW: ${summary.etw_state || "?"}`;
+  // "lossy" = alive but dropping events; say how many, so the size of the
+  // hole in visibility is visible rather than just its existence.
+  const dropped = (summary.sysmon_dropped_events || 0) + (summary.etw_dropped_events || 0);
+  if (dropped > 0) sub += ` · ${dropped} events dropped`;
+  document.getElementById("sensorHealthSub").textContent = sub;
 }
 
 function renderPeakThreatGauge(summary, processes) {
@@ -132,7 +137,7 @@ function renderSummary(summary) {
   let badgeClass = "badge-ok";
   if (summary.sensor_status.includes("unavailable")) {
     badgeClass = "badge-off";
-  } else if (summary.sysmon_stale || summary.etw_stale) {
+  } else if (summary.sysmon_stale || summary.etw_stale || summary.sensor_status.includes("lossy")) {
     badgeClass = "badge-warn";
   }
   badge.className = "badge " + badgeClass;

@@ -57,8 +57,9 @@ def main():
 
     sysmon_health = SensorHealth("sysmon")
     etw_health = SensorHealth("etw")
-    sub_handle = start_monitor(engine, on_heartbeat=sysmon_health.touch)
-    etw_handle = start_etw_monitor(engine, on_heartbeat=etw_health.touch, correlator=correlator)
+    sub_handle = start_monitor(engine, on_heartbeat=sysmon_health.touch, on_drop=sysmon_health.record_drop)
+    etw_handle = start_etw_monitor(engine, on_heartbeat=etw_health.touch, correlator=correlator,
+                                   on_drop=etw_health.record_drop)
 
     def _blind_state():
         # No dashboard is polling this CLI entrypoint, so the watchdog is

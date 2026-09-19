@@ -184,8 +184,10 @@ class Backend:
 
         logging.info("[*] Starting Behavioral Telemetry Monitors (Sysmon + ETW)...")
         self.correlator.start()
-        self._sysmon_handle = start_monitor(self.engine, on_heartbeat=self.sysmon_health.touch)
-        self._etw_handle = start_etw_monitor(self.engine, on_heartbeat=self.etw_health.touch, correlator=self.correlator)
+        self._sysmon_handle = start_monitor(self.engine, on_heartbeat=self.sysmon_health.touch,
+                                            on_drop=self.sysmon_health.record_drop)
+        self._etw_handle = start_etw_monitor(self.engine, on_heartbeat=self.etw_health.touch,
+                                             correlator=self.correlator, on_drop=self.etw_health.record_drop)
         threading.Thread(
             target=watchdog_loop,
             args=([self.sysmon_health, self.etw_health],),
@@ -258,6 +260,11 @@ class Backend:
             # existing badge rendering.
             "sysmon_state": sysmon_label,
             "etw_state": etw_label,
+            # Events a sensor observed but had to discard because its bounded
+            # queue was full (all time, this run) - the size of the visibility
+            # hole behind a "lossy" state.
+            "sysmon_dropped_events": self.sysmon_health.drops_total(),
+            "etw_dropped_events": self.etw_health.drops_total(),
             # Aggregate visibility state (see sensor_health.compute_blind_state)
             # - HEALTHY/DEGRADED/PARTIALLY_BLIND/CRITICALLY_BLIND, driven by
             # telemetry integrity rather than just "is the process running".

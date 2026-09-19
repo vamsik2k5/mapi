@@ -293,6 +293,161 @@ def test_watchdog_loop_with_stop_event_still_logs_transitions():
     assert len(calls) == 1 and "etw" in calls[0]
 
 
+def _with_fake_clock(fn):
+    clock = _FakeClock()
+    original = sh.time.monotonic
+    sh.time.monotonic = clock
+    try:
+        return fn(clock)
+    finally:
+        sh.time.monotonic = original
+
+
+def test_a_sensor_that_never_dropped_is_not_lossy():
+    sensor = SensorHealth("x")
+    assert sensor.is_lossy() is False
+    assert sensor.drops_total() == 0
+
+
+def test_record_drop_makes_a_sensor_lossy_until_the_window_passes():
+    def scenario(clock):
+        sensor = SensorHealth("x", drop_window=10)
+        sensor.record_drop()
+        assert sensor.is_lossy() is True and sensor.drops_total() == 1
+        clock.advance(10)
+        assert sensor.is_lossy() is True, "exactly at the window edge is still inside it"
+        clock.advance(0.01)
+        assert sensor.is_lossy() is False, "once the window has passed with no new drop, the sensor recovers"
+        assert sensor.drops_total() == 1, "the all-time count never resets"
+        sensor.record_drop()
+        assert sensor.is_lossy() is True and sensor.drops_total() == 2, "a new drop starts a new window"
+    _with_fake_clock(scenario)
+
+
+def test_a_drop_does_not_affect_staleness():
+    def scenario(clock):
+        sensor = SensorHealth("x", stale_after=60)
+        sensor.touch()
+        sensor.record_drop()
+        assert sensor.is_stale() is False
+        clock.advance(61)
+        assert sensor.is_stale() is True
+    _with_fake_clock(scenario)
+
+
+def test_sensor_label_reports_lossy_for_a_live_sensor_that_is_dropping():
+    def scenario(clock):
+        sensor = SensorHealth("x", stale_after=60, drop_window=30)
+        sensor.touch()
+        assert sensor_label(object(), sensor) == "live"
+        sensor.record_drop()
+        assert sensor_label(object(), sensor) == "lossy"
+        clock.advance(31)
+        sensor.touch()
+        assert sensor_label(object(), sensor) == "live", "recovers once drops stop"
+    _with_fake_clock(scenario)
+
+
+def test_sensor_label_stale_and_unavailable_outrank_lossy():
+    def scenario(clock):
+        sensor = SensorHealth("x", stale_after=5, drop_window=100)
+        sensor.touch()
+        sensor.record_drop()
+        clock.advance(6)  # stopped delivering, but its last drop is still inside the window
+        assert sensor_label(object(), sensor) == "stale", "a stopped sensor is worse than an overloaded one"
+        assert sensor_label(None, sensor) == "unavailable", "a sensor that never started is unavailable, whatever its counters say"
+    _with_fake_clock(scenario)
+
+
+def test_blind_state_lossy_sensor_degrades_but_never_blinds():
+    # a lossy sensor is still delivering, so on its own it can only DEGRADE
+    assert compute_blind_state(["live", "lossy"], ever_seen_event=True) == BLIND_STATE_DEGRADED
+    assert compute_blind_state(["lossy", "live"], ever_seen_event=False) == BLIND_STATE_DEGRADED
+    assert compute_blind_state(["lossy", "lossy"], ever_seen_event=True) == BLIND_STATE_DEGRADED
+    assert compute_blind_state(["lossy", "lossy"], ever_seen_event=False) == BLIND_STATE_DEGRADED
+    assert compute_blind_state(["lossy"], ever_seen_event=True) == BLIND_STATE_DEGRADED
+    # ...alongside a sensor that is down it is the one still delivering
+    assert compute_blind_state(["lossy", "stale"], ever_seen_event=True) == BLIND_STATE_DEGRADED
+    assert compute_blind_state(["unavailable", "lossy"], ever_seen_event=False) == BLIND_STATE_DEGRADED
+    # ...and it never rescues a state with nothing delivering
+    assert compute_blind_state(["stale", "unavailable"], ever_seen_event=True) == BLIND_STATE_PARTIALLY_BLIND
+    assert compute_blind_state(["live", "live"], ever_seen_event=True) == BLIND_STATE_HEALTHY
+
+
+def test_current_blind_state_degrades_when_a_live_sensor_is_dropping_events():
+    def scenario(clock):
+        a, b = SensorHealth("a", drop_window=10), SensorHealth("b", drop_window=10)
+        a.touch()
+        b.touch()
+        pairs = [(object(), a), (object(), b)]
+        assert current_blind_state(pairs) == BLIND_STATE_HEALTHY
+        b.record_drop()
+        assert current_blind_state(pairs) == BLIND_STATE_DEGRADED
+        clock.advance(11)
+        a.touch()
+        b.touch()
+        assert current_blind_state(pairs) == BLIND_STATE_HEALTHY, "recovers by itself once the drops stop"
+    _with_fake_clock(scenario)
+
+
+def _run_watchdog_ticks(sensor, before_tick, ticks):
+    """Drive watchdog_loop for `ticks` ticks with a fake sleep; before_tick(n)
+    runs at the start of tick n (1-based). Returns the warnings logged."""
+    warnings = []
+    original_sleep, original_warning = sh.time.sleep, sh.logging.warning
+    sh.logging.warning = lambda msg: warnings.append(msg)
+    state = {"n": 0}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_sleep(seconds):
+        state["n"] += 1
+        if state["n"] > ticks:
+            raise _Stop()
+        before_tick(state["n"])
+
+    sh.time.sleep = _fake_sleep
+    try:
+        try:
+            watchdog_loop([sensor], interval=1)
+        except _Stop:
+            pass
+    finally:
+        sh.time.sleep, sh.logging.warning = original_sleep, original_warning
+    return warnings
+
+
+def test_watchdog_logs_each_transition_into_lossy_once_and_names_the_count():
+    def scenario(clock):
+        sensor = SensorHealth("etw", stale_after=1000, drop_window=10)
+        sensor.touch()
+
+        def before_tick(n):
+            if n == 1:
+                for _ in range(3):
+                    sensor.record_drop()   # tick 1: becomes lossy (3 dropped)
+            elif n == 3:
+                clock.advance(11)          # tick 3: window has passed -> recovers silently
+                sensor.touch()
+            elif n == 4:
+                sensor.record_drop()       # tick 4: a fresh transition into lossy
+
+        warnings = _run_watchdog_ticks(sensor, before_tick, ticks=5)
+        lossy = [w for w in warnings if "dropping events" in w]
+        assert len(lossy) == 2, f"one log per transition into lossy, not per tick: {warnings}"
+        assert "etw" in lossy[0] and "3 dropped so far" in lossy[0]
+        assert "4 dropped so far" in lossy[1], "the count is the all-time total"
+        assert not any("stale" in w for w in warnings), "dropping events is not the same as being stale"
+    _with_fake_clock(scenario)
+
+
+def test_degraded_caveat_covers_a_sensor_that_is_dropping_events():
+    caveat = negative_evidence_caveat(BLIND_STATE_DEGRADED)
+    assert "dropping events" in caveat and "down" in caveat
+    assert caveat != negative_evidence_caveat(BLIND_STATE_CRITICALLY_BLIND)
+
+
 def test_negative_evidence_caveat_none_when_healthy():
     assert negative_evidence_caveat(BLIND_STATE_HEALTHY) is None
 

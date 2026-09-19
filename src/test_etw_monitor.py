@@ -119,6 +119,48 @@ def test_on_heartbeat_does_not_fire_for_an_ignored_event():
     assert calls == []
 
 
+def test_heartbeat_requires_a_process_id():
+    # A ProcessStart-shaped event with no ProcessID is unusable (the worker
+    # logs an error scoring it), so it must not prove the sensor is alive -
+    # but it is still queued so that error is recorded.
+    q = queue.Queue()
+    calls = []
+    em._on_etw_event((1, {"Task Name": "PROCESSSTART"}), q, on_heartbeat=lambda: calls.append(1))
+    assert calls == []
+    assert q.qsize() == 1
+
+
+def test_on_drop_fires_when_the_queue_is_full_and_only_then():
+    full = queue.Queue(maxsize=1)
+    full.put_nowait((1, 1, "already-here.exe", 1.0))
+    drops = []
+    em._on_etw_event(_process_start_event(), full, on_drop=lambda: drops.append(1))  # must not raise
+    assert drops == [1]
+    assert full.qsize() == 1
+
+    drops = []
+    em._on_etw_event(_process_start_event(), queue.Queue(maxsize=5), on_drop=lambda: drops.append(1))
+    assert drops == []
+
+
+def test_a_dropped_event_still_counts_as_liveness():
+    full = queue.Queue(maxsize=1)
+    full.put_nowait((1, 1, "already-here.exe", 1.0))
+    beats, drops = [], []
+    em._on_etw_event(_process_start_event(), full, on_heartbeat=lambda: beats.append(1), on_drop=lambda: drops.append(1))
+    assert beats == [1] and drops == [1], "overloaded is not dead: both signals must fire"
+
+
+def test_ignored_and_malformed_events_are_never_counted_as_drops():
+    full = queue.Queue(maxsize=1)
+    full.put_nowait((1, 1, "already-here.exe", 1.0))
+    drops = []
+    em._on_etw_event((2, {"Task Name": "PROCESSSTOP", "EventHeader": {"EventDescriptor": {"Task": 2}}}), full,
+                     on_drop=lambda: drops.append(1))
+    em._on_etw_event("garbage", full, on_drop=lambda: drops.append(1))
+    assert drops == [], "only an event that was actually lost to a full queue is a drop"
+
+
 def test_scoring_worker_drains_queue_on_its_own_thread():
     engine = _FakeEngine()
     q = queue.Queue()

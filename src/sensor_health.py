@@ -26,6 +26,10 @@ import time
 
 DEFAULT_STALE_AFTER_SECONDS = 60
 DEFAULT_WATCHDOG_INTERVAL_SECONDS = 15
+# How long after its last dropped event a sensor still counts as "lossy".
+# Any drop means the bounded queue was completely full - scoring is far
+# behind - so a single drop is enough to call visibility incomplete.
+DEFAULT_DROP_WINDOW_SECONDS = 60
 
 BLIND_STATE_HEALTHY = "HEALTHY"
 BLIND_STATE_DEGRADED = "DEGRADED"
@@ -54,8 +58,8 @@ _BLIND_STATE_LOG_LEVEL = {
 _BLIND_STATE_CAVEATS = {
     BLIND_STATE_HEALTHY: None,
     BLIND_STATE_DEGRADED: (
-        "One telemetry sensor is down - process visibility continues from "
-        "the other, but some detections may be delayed or missed."
+        "A telemetry sensor is down or dropping events - process visibility "
+        "continues from what remains, but some detections may be delayed or missed."
     ),
     BLIND_STATE_PARTIALLY_BLIND: (
         "No behavioral sensor is currently live. Alert counts may not "
@@ -87,15 +91,35 @@ def negative_evidence_caveat(state):
 
 
 class SensorHealth:
-    def __init__(self, name, stale_after=DEFAULT_STALE_AFTER_SECONDS):
+    def __init__(self, name, stale_after=DEFAULT_STALE_AFTER_SECONDS, drop_window=DEFAULT_DROP_WINDOW_SECONDS):
         self.name = name
         self.stale_after = stale_after
+        self.drop_window = drop_window
         self._lock = threading.Lock()
         self._last_heartbeat = None
+        self._last_drop = None
+        self._drops_total = 0
 
     def touch(self):
         with self._lock:
             self._last_heartbeat = time.monotonic()
+
+    def record_drop(self):
+        """The sensor observed an event but had to discard it (its bounded
+        queue was full). Called from the sensor's OS callback thread."""
+        with self._lock:
+            self._last_drop = time.monotonic()
+            self._drops_total += 1
+
+    def is_lossy(self):
+        """True if an event was dropped within the last `drop_window` seconds:
+        the sensor is alive and delivering, but visibility is incomplete."""
+        with self._lock:
+            return self._last_drop is not None and (time.monotonic() - self._last_drop) <= self.drop_window
+
+    def drops_total(self):
+        with self._lock:
+            return self._drops_total
 
     def seconds_since_heartbeat(self):
         with self._lock:
@@ -121,21 +145,29 @@ def sensor_label(handle, health):
     Administrator elevation); `health` is that sensor's SensorHealth.
     'unavailable' is a startup condition, deliberately distinct from a
     heartbeat merely going 'stale' after having been 'live' - the latter
-    means something died mid-run, the former means it never ran."""
+    means something died mid-run, the former means it never ran. 'lossy'
+    means the sensor is delivering but recently had to drop events because
+    its queue was full: alive, yet its picture of the endpoint has holes.
+    Stale wins over lossy - a sensor that has stopped is worse than one
+    that is merely overloaded."""
     if not handle:
         return "unavailable"
-    return "stale" if health.is_stale() else "live"
+    if health.is_stale():
+        return "stale"
+    return "lossy" if health.is_lossy() else "live"
 
 
 def compute_blind_state(sensor_states, ever_seen_event):
-    """Reduce every behavioral sensor's label ('live'/'stale'/'unavailable',
-    see sensor_label()) to one aggregate visibility state:
+    """Reduce every behavioral sensor's label ('live'/'lossy'/'stale'/
+    'unavailable', see sensor_label()) to one aggregate visibility state:
 
     - HEALTHY: every sensor live.
-    - DEGRADED: at least one sensor down, but at least one independent
-      sensor still live - some redundancy has been lost, but process-create
-      visibility keeps flowing from a source that isn't the dead one.
-    - PARTIALLY_BLIND / CRITICALLY_BLIND: no sensor live at all. Split by
+    - DEGRADED: visibility is reduced but not gone - at least one sensor is
+      down or dropping events (lossy), yet at least one is still delivering.
+      A lossy sensor still delivers, so it never makes the endpoint worse
+      than DEGRADED on its own.
+    - PARTIALLY_BLIND / CRITICALLY_BLIND: no sensor delivering at all (every
+      sensor stale or unavailable; a lossy one still counts as delivering). Split by
       `ever_seen_event` (pass e.g. `engine.total_events_seen > 0`) because
       "every sensor is down after having worked" (a live, in-session loss of
       visibility - PARTIALLY_BLIND) is a meaningfully different, more
@@ -151,7 +183,8 @@ def compute_blind_state(sensor_states, ever_seen_event):
     live_count = sum(1 for s in states if s == "live")
     if live_count == len(states):
         return BLIND_STATE_HEALTHY
-    if live_count > 0:
+    delivering_count = sum(1 for s in states if s in ("live", "lossy"))
+    if delivering_count > 0:
         return BLIND_STATE_DEGRADED
     return BLIND_STATE_PARTIALLY_BLIND if ever_seen_event else BLIND_STATE_CRITICALLY_BLIND
 
@@ -189,7 +222,9 @@ def watchdog_loop(sensors, interval=DEFAULT_WATCHDOG_INTERVAL_SECONDS, blind_sta
 
     Logs once on each fresh -> stale transition per sensor, not on every
     poll tick, so a long-dead sensor doesn't spam the alert feed every
-    `interval` seconds.
+    `interval` seconds. Likewise once on each transition into "lossy" (a
+    live sensor that has started dropping events), naming how many it has
+    dropped so far - that count is the "how much visibility was lost".
 
     If `blind_state_fn` is given, it's called with no arguments each tick
     and must return one of the BLIND_STATE_* constants (see
@@ -200,6 +235,7 @@ def watchdog_loop(sensors, interval=DEFAULT_WATCHDOG_INTERVAL_SECONDS, blind_sta
     the very first tick already isn't healthy, that's logged immediately
     rather than treated as an already-known starting condition."""
     was_stale = {sensor.name: False for sensor in sensors}
+    was_lossy = {sensor.name: False for sensor in sensors}
     last_blind_state = BLIND_STATE_HEALTHY
     while True:
         if stop_event is None:
@@ -213,6 +249,14 @@ def watchdog_loop(sensors, interval=DEFAULT_WATCHDOG_INTERVAL_SECONDS, blind_sta
                 age_desc = "no events ever received" if age is None else f"last event {round(age)}s ago"
                 logging.warning(f"[WATCHDOG] {sensor.name} sensor stale - {age_desc}")
             was_stale[sensor.name] = stale_now
+
+            lossy_now = sensor.is_lossy()
+            if lossy_now and not was_lossy[sensor.name]:
+                logging.warning(
+                    f"[WATCHDOG] {sensor.name} sensor dropping events - {sensor.drops_total()} "
+                    f"dropped so far (its queue is full; scoring is falling behind)"
+                )
+            was_lossy[sensor.name] = lossy_now
 
         if blind_state_fn is not None:
             state = blind_state_fn()

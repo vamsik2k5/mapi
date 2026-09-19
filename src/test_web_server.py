@@ -235,6 +235,35 @@ def test_backend_summary_visibility_caveat_distinguishes_degraded_from_criticall
         "a partially-redundant DEGRADED state and total CRITICALLY_BLIND must not get the same caveat"
 
 
+def test_backend_summary_reports_a_lossy_sensor_its_drop_count_and_recovery():
+    backend = ws.Backend()
+    backend._sysmon_handle = object()
+    backend._etw_handle = object()
+    backend.sysmon_health.touch()
+    backend.etw_health.touch()
+    healthy = backend.summary()
+    assert healthy["blind_state"] == "HEALTHY" and healthy["etw_state"] == "live"
+    assert healthy["etw_dropped_events"] == 0 and healthy["sysmon_dropped_events"] == 0
+
+    for _ in range(3):
+        backend.etw_health.record_drop()
+    lossy = backend.summary()
+    assert lossy["etw_state"] == "lossy" and "ETW: lossy" in lossy["sensor_status"]
+    assert lossy["sysmon_state"] == "live"
+    assert lossy["blind_state"] == "DEGRADED"
+    assert lossy["negative_evidence_reliable"] is False and lossy["visibility_caveat"]
+    assert lossy["etw_dropped_events"] == 3 and lossy["sysmon_dropped_events"] == 0
+    assert lossy["etw_stale"] is False, "a sensor that is dropping events is not stale"
+
+    backend.etw_health.drop_window = 0.05  # let the drops age out
+    time.sleep(0.07)
+    backend.sysmon_health.touch()
+    backend.etw_health.touch()
+    recovered = backend.summary()
+    assert recovered["etw_state"] == "live" and recovered["blind_state"] == "HEALTHY"
+    assert recovered["etw_dropped_events"] == 3, "the all-time count is kept after recovery"
+
+
 class _FakeETWSession:
     def __init__(self):
         self.stop_calls = 0
@@ -375,6 +404,7 @@ if __name__ == "__main__":
     test_backend_summary_blind_state_recovers_when_sensor_comes_back()
     test_backend_summary_negative_evidence_reliable_only_when_healthy()
     test_backend_summary_visibility_caveat_distinguishes_degraded_from_critically_blind()
+    test_backend_summary_reports_a_lossy_sensor_its_drop_count_and_recovery()
     test_backend_stop_releases_the_etw_session_exactly_once()
     test_backend_stop_without_an_etw_session_is_harmless()
     test_main_releases_the_etw_session_on_ctrl_c()

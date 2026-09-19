@@ -64,7 +64,7 @@ EVENT_QUEUE_MAXSIZE = 2000
 WINEVENT_KEYWORD_PROCESS = 0x10
 
 
-def _on_etw_event(event_tufo, event_queue, on_heartbeat=None):
+def _on_etw_event(event_tufo, event_queue, on_heartbeat=None, on_drop=None):
     """pywintrace's ETW callback shape: event_tufo = (event_id, event_dict).
     Filters to ProcessStart, extracts the thin field set, enqueues a plain
     tuple (not the raw event_dict) so the scoring worker doesn't need to
@@ -92,13 +92,18 @@ def _on_etw_event(event_tufo, event_queue, on_heartbeat=None):
         logging.error(f"[ETW] Error extracting fields from a Kernel-Process event: {e}")
         return
 
-    if on_heartbeat:
+    # A ProcessStart that carries no ProcessID is unusable (the worker will
+    # log an error scoring it), so it must not count as the sensor being alive.
+    # It is still queued so that error is recorded rather than swallowed.
+    if on_heartbeat and pid is not None:
         on_heartbeat()
 
     try:
         event_queue.put_nowait((pid, parent_pid, image_name, create_time))
     except queue.Full:
         logging.warning("[ETW] Event queue full - dropping an event because scoring is falling behind.")
+        if on_drop:
+            on_drop()
 
 
 def _scoring_worker(engine_instance, event_queue, correlator=None):
@@ -117,7 +122,7 @@ def _scoring_worker(engine_instance, event_queue, correlator=None):
             logging.error(f"[ETW] Scoring worker failed on an event: {e}")
 
 
-def start_etw_monitor(engine_instance, on_heartbeat=None, correlator=None):
+def start_etw_monitor(engine_instance, on_heartbeat=None, correlator=None, on_drop=None):
     """correlator (process_correlator.ProcessCorrelator), if given, receives
     every decoded ProcessStart instead of the engine directly - None (the
     default) preserves the exact single-sensor behavior this module had
@@ -128,7 +133,7 @@ def start_etw_monitor(engine_instance, on_heartbeat=None, correlator=None):
         threading.Thread(target=_scoring_worker, args=(engine_instance, event_queue, correlator), daemon=True).start()
 
         def _callback(event_tufo):
-            _on_etw_event(event_tufo, event_queue, on_heartbeat=on_heartbeat)
+            _on_etw_event(event_tufo, event_queue, on_heartbeat=on_heartbeat, on_drop=on_drop)
 
         # ProviderInfo stores whatever `guid` it's given verbatim, and
         # pywintrace's EventProvider.start()/stop() later does

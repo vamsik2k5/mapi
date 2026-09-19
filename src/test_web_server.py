@@ -235,6 +235,118 @@ def test_backend_summary_visibility_caveat_distinguishes_degraded_from_criticall
         "a partially-redundant DEGRADED state and total CRITICALLY_BLIND must not get the same caveat"
 
 
+class _FakeETWSession:
+    def __init__(self):
+        self.stop_calls = 0
+
+    def stop(self):
+        self.stop_calls += 1
+
+
+def test_backend_stop_releases_the_etw_session_exactly_once():
+    backend = ws.Backend()
+    session = _FakeETWSession()
+    backend._etw_handle = session
+    backend.stop()
+    backend.stop()  # idempotent: a second call must not stop it again
+    assert session.stop_calls == 1
+    assert backend._etw_handle is None
+
+
+def test_backend_stop_without_an_etw_session_is_harmless():
+    ws.Backend().stop()  # ETW never started (e.g. not elevated): nothing to release, must not raise
+
+
+def _run_web_main(serve_error=None, bind_error=None, start_error=None):
+    """Runs web_server.main() with every side effect faked (backend, server,
+    browser, UAC self-elevation, single-instance probe) and returns the order
+    of the calls it made plus any exception it let escape."""
+    import logging
+    import os
+
+    calls = []
+
+    class _FakeBackend:
+        def start(self):
+            calls.append("start")
+            if start_error:
+                raise start_error
+
+        def stop(self):
+            calls.append("stop")
+
+    class _FakeServer:
+        def __init__(self, address, handler):
+            if bind_error:
+                raise bind_error
+            calls.append("bind")
+
+        def serve_forever(self):
+            calls.append("serve")
+            if serve_error:
+                raise serve_error
+
+        def shutdown(self):
+            calls.append("shutdown")
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    saved = (ws.Backend, ws.DashboardServer, ws._wait_for_dashboard, ws.webbrowser.open,
+             ws.DashboardHandler.backend, os.environ.get("EDR_NO_ELEVATE"))
+    ws.Backend, ws.DashboardServer = _FakeBackend, _FakeServer
+    ws._wait_for_dashboard = lambda timeout, interval=0.5: False
+    ws.webbrowser.open = lambda url: None
+    os.environ["EDR_NO_ELEVATE"] = "1"
+    escaped = None
+    try:
+        ws.main()
+    except BaseException as e:  # noqa: BLE001 - the test inspects exactly what escapes
+        escaped = e
+    finally:
+        (ws.Backend, ws.DashboardServer, ws._wait_for_dashboard, ws.webbrowser.open,
+         ws.DashboardHandler.backend, previous_env) = saved
+        if previous_env is None:
+            os.environ.pop("EDR_NO_ELEVATE", None)
+        else:
+            os.environ["EDR_NO_ELEVATE"] = previous_env
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+    return calls, escaped
+
+
+def test_main_releases_the_etw_session_on_ctrl_c():
+    # The reported bug: Ctrl+C stopped the server but left pywintrace's
+    # non-daemon consumer thread running, so the process hung until a 2nd Ctrl+C.
+    calls, escaped = _run_web_main(serve_error=KeyboardInterrupt())
+    assert escaped is None
+    assert calls == ["start", "bind", "serve", "shutdown", "stop"], "stop() must run last, after the server shut down"
+
+
+def test_main_releases_the_etw_session_when_the_port_is_already_taken():
+    # Same bug, second exit path: backend.start() had already launched the ETW
+    # thread when the bind failed and main() returned.
+    calls, escaped = _run_web_main(bind_error=OSError("Address already in use"))
+    assert escaped is None
+    assert calls == ["start", "stop"]
+
+
+def test_main_releases_the_etw_session_on_an_unexpected_error():
+    boom = RuntimeError("boom")
+    calls, escaped = _run_web_main(serve_error=boom)
+    assert escaped is boom, "the error must still propagate, not be swallowed"
+    assert calls == ["start", "bind", "serve", "stop"]
+
+
+def test_main_releases_the_etw_session_even_if_backend_start_fails_midway():
+    boom = RuntimeError("sensor start failed after ETW came up")
+    calls, escaped = _run_web_main(start_error=boom)
+    assert escaped is boom
+    assert calls == ["start", "stop"]
+
+
 def test_dashboard_server_refuses_to_share_a_port():
     # The bug this guards against: http.server's default
     # allow_reuse_address=True let two separate elevated instances bind
@@ -263,5 +375,11 @@ if __name__ == "__main__":
     test_backend_summary_blind_state_recovers_when_sensor_comes_back()
     test_backend_summary_negative_evidence_reliable_only_when_healthy()
     test_backend_summary_visibility_caveat_distinguishes_degraded_from_critically_blind()
+    test_backend_stop_releases_the_etw_session_exactly_once()
+    test_backend_stop_without_an_etw_session_is_harmless()
+    test_main_releases_the_etw_session_on_ctrl_c()
+    test_main_releases_the_etw_session_when_the_port_is_already_taken()
+    test_main_releases_the_etw_session_on_an_unexpected_error()
+    test_main_releases_the_etw_session_even_if_backend_start_fails_midway()
     test_dashboard_server_refuses_to_share_a_port()
     print("OK")

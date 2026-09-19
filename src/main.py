@@ -3,7 +3,7 @@ import time
 import logging
 from static_scanner import StaticScanner
 from telemetry_monitor import start_monitor
-from etw_monitor import start_etw_monitor
+from etw_monitor import start_etw_monitor, stop_etw_monitor
 from heuristic_engine import HeuristicEngine
 from module_inspector import ModuleInspector
 from process_correlator import ProcessCorrelator
@@ -117,6 +117,10 @@ def main():
                 inspector.sweep()
     except KeyboardInterrupt:
         logging.info("\n[*] Shutting down Defensive Agent...")
+    finally:
+        # pywintrace's consumer thread is not a daemon; unless it is stopped the
+        # process can't exit (see etw_monitor.stop_etw_monitor).
+        stop_etw_monitor(etw_handle)
 
 if __name__ == "__main__":
     main()

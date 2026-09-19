@@ -30,7 +30,7 @@ from urllib.parse import urlsplit, parse_qs
 from heuristic_engine import HeuristicEngine
 from static_scanner import StaticScanner
 from telemetry_monitor import start_monitor
-from etw_monitor import start_etw_monitor
+from etw_monitor import start_etw_monitor, stop_etw_monitor
 from module_inspector import ModuleInspector
 from process_correlator import ProcessCorrelator
 from rule_engine import RuleEngine
@@ -208,6 +208,13 @@ class Backend:
             },
             daemon=True,
         ).start()
+
+    def stop(self):
+        """Release the ETW session so the process can exit (see
+        etw_monitor.stop_etw_monitor). Every other thread here is a daemon;
+        pywintrace's consumer thread is the one that isn't. Idempotent."""
+        etw_session, self._etw_handle = self._etw_handle, None
+        stop_etw_monitor(etw_session)
 
     def _module_sweep_loop(self):
         while True:
@@ -462,22 +469,27 @@ def main():
         logging.warning("Elevated instance never came up (declined, blocked, or failed) - continuing here without admin; Sysmon telemetry will be unavailable, static analysis and the module sweep still run.")
 
     backend = Backend()
-    backend.start()
-
-    DashboardHandler.backend = backend
     try:
-        server = DashboardServer((HOST, PORT), DashboardHandler)
-    except OSError as e:
-        logging.error(f"Could not bind {HOST}:{PORT} ({e}). A dashboard is probably already running under a different account/elevation level - close it first.")
-        return
+        backend.start()
 
-    logging.info(f"Dashboard live at {_dashboard_url()}")
-    webbrowser.open(_dashboard_url())
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        logging.info("Shutting down dashboard server...")
-        server.shutdown()
+        DashboardHandler.backend = backend
+        try:
+            server = DashboardServer((HOST, PORT), DashboardHandler)
+        except OSError as e:
+            logging.error(f"Could not bind {HOST}:{PORT} ({e}). A dashboard is probably already running under a different account/elevation level - close it first.")
+            return
+
+        logging.info(f"Dashboard live at {_dashboard_url()}")
+        webbrowser.open(_dashboard_url())
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            logging.info("Shutting down dashboard server...")
+            server.shutdown()
+    finally:
+        # Every way out of main() - Ctrl+C, a failed bind, an unexpected error -
+        # must release the ETW session or the process can't exit.
+        backend.stop()
 
 
 if __name__ == "__main__":

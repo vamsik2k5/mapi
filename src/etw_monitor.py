@@ -150,3 +150,30 @@ def start_etw_monitor(engine_instance, on_heartbeat=None, correlator=None):
     except Exception as e:
         logging.error(f"[!] Failed to start ETW capture (Ensure you are running as Administrator): {e}")
         return None
+
+
+def stop_etw_monitor(session):
+    """Stop the session start_etw_monitor() returned. Safe to call with None
+    (the sensor never started) and never raises.
+
+    Needed because pywintrace's consumer thread is not a daemon and blocks in
+    ProcessTrace() until told to stop, so a process that just falls off the
+    end of main() can't exit - Ctrl+C then needs a second press, which prints
+    a KeyboardInterrupt traceback from threading._shutdown.
+
+    ETW.stop() disables the provider *before* it stops the consumer thread and
+    doesn't guard the first step: if EnableTraceEx2/ControlTrace fails it
+    raises, the consumer is never told to stop, and the hang comes back. So on
+    failure the consumer is stopped directly."""
+    if session is None:
+        return
+    try:
+        session.stop()
+    except Exception as e:
+        logging.error(f"[!] ETW session did not stop cleanly: {e}")
+        try:
+            session.consumer.stop()
+        except Exception as consumer_error:
+            logging.error(f"[!] ETW consumer thread could not be stopped either: {consumer_error}")
+        return
+    logging.info("[*] ETW kernel-process capture stopped.")

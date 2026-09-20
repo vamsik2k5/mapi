@@ -1,0 +1,210 @@
+{
+  "2057790ae7855765d51bdc4142e62f9c": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-08-16 02:30:06",
+    "query": "signature:QuasarRAT",
+    "sample_count": 4,
+    "source": "malwarebazaar"
+  },
+  "22d2097fddb55e4b610171b15e37eaf0": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-06-03 16:11:24",
+    "query": "signature:QuasarRAT",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "3835d42d483ba2abdd960b570386b19d": {
+    "family": "ValleyRAT",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 12:03:28",
+    "query": "recent:100",
+    "sample_count": 2,
+    "source": "malwarebazaar"
+  },
+  "4cea7ae85c87ddc7295d39ff9cda31d1": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-06-08 09:55:13",
+    "query": "signature:QuasarRAT",
+    "sample_count": 2,
+    "source": "malwarebazaar"
+  },
+  "4d0fb8dc9ee470058274f448bebbb85f": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-08-15 08:03:13",
+    "query": "signature:QuasarRAT",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "4f2f006e2ecf7172ad368f8289dc96c1": {
+    "family": "RemusStealer",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 13:50:16",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "5711a63b7de7f103971facc55a77efee": {
+    "family": "unclassified",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 12:00:14",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "58f4b17816a07f7a36dd14e504d515e6": {
+    "family": "unclassified",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 11:41:02",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "5a2ed47d8c6c6433dbc831d38c92042b": {
+    "family": "unclassified",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 15:10:45",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "66f1d669875f10b3526b656a280f3f56": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-07-09 06:27:08",
+    "query": "signature:QuasarRAT",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "91c15b4b4bd0b0e28e33db730aa2d50c": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-07-10 23:50:25",
+    "query": "signature:QuasarRAT",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "9604a8f36aada5880b66fffb66886608": {
+    "family": "unclassified",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 14:49:00",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "9771ee6344923fa220489ab01239bdfd": {
+    "family": "ConnectWise",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 13:22:59",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "9cbefe68f395e67356e2a5d8d1b285c0": {
+    "family": "RemusStealer",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 13:10:44",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "a1c4582367a576a695533c75914d8c39": {
+    "family": "ValleyRAT",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 12:04:41",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "bfaeef976630e9076ef34a1a9628bf4d": {
+    "family": "unclassified",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 14:37:59",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "c5e134cc1c1e4c253962fc1102568c64": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-07-09 17:12:33",
+    "query": "signature:QuasarRAT",
+    "sample_count": 2,
+    "source": "malwarebazaar"
+  },
+  "c991c71919f4b51d7246252fc659014b": {
+    "family": "unclassified",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 15:11:40",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "cbe38d59706d64beb1315c060f9494a9": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-05-31 13:06:04",
+    "query": "signature:QuasarRAT",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "d9cf11d5ad37e7ba4c5b3ed284f1150d": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-07-11 00:10:07",
+    "query": "signature:QuasarRAT",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "dae02f32a21e03ce65412f6e56942daa": {
+    "family": "QuasarRAT",
+    "file_type": "exe",
+    "first_seen": "2026-08-03 13:07:55",
+    "query": "signature:QuasarRAT",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "e569e6f445d32ba23766ad67d1e3787f": {
+    "family": "Gh0stRAT",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 12:01:52",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "edd9caae8565fbe43a73e0ad530f325e": {
+    "family": "Phorpiex",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 11:41:14",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "f34d5f2d4577ed6d9ceec516c1f5a744": {
+    "family": "RatonRAT",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 15:10:17",
+    "query": "recent:100",
+    "sample_count": 54,
+    "source": "malwarebazaar"
+  },
+  "fc1d45e2b662c656e1a56e88c9fc63e6": {
+    "family": "ValleyRAT",
+    "file_type": "dll",
+    "first_seen": "2026-08-26 15:10:13",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  },
+  "fe230628262faec735b6f015758b7519": {
+    "family": "unclassified",
+    "file_type": "exe",
+    "first_seen": "2026-08-26 13:31:57",
+    "query": "recent:100",
+    "sample_count": 1,
+    "source": "malwarebazaar"
+  }
+}

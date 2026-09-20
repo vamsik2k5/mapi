@@ -1,0 +1,235 @@
+title: Suspicious Registry Persistence and Browser Data Access
+id: a23d4e67-8910-11eb-8dcd-0242ac130003
+status: experimental
+description: Detects processes that modify registry Run keys and access sensitive browser data paths, indicative of Quasar RAT behavior.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    # Rule 1: Quasar RAT Registry Persistence
+    registry_run_keys:
+        EventID: 13 # Registry value set (Sysmon)
+        TargetObject|contains:
+            - '\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+            - '\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
+            - '\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'
+            - '\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce'
+    
+    # Rule 2: Browser Data Access
+    browser_access:
+        EventID: 11 # FileCreate / File Access (Sysmon)
+        TargetFilename|contains:
+            - 'BraveSoftware\Brave-Browser\User Data\Default\Login Data'
+            - 'Opera Software\Opera GX Stable\Login Data'
+            - 'Internet Explorer\IntelliForms\Storage2'
+    
+    # Rule 3: NSIS Dropper Suspicious Process Creation
+    nsis_dropper:
+        EventID: 1
+        Image|endswith: '\cmd.exe'
+        ParentImage|endswith: '.tmp' # NSIS often extracts and runs from temp directories
+
+    condition: registry_run_keys or browser_access or nsis_dropper
+falsepositives:
+    - Legitimate software installers
+    - Legitimate browser backup tools
+level: high
+---
+title: Suspicious Access to LSASS Process Memory
+id: b4e5f78a-2233-45cd-9e01-3af7c2d891f4
+status: experimental
+description: >
+    Detects processes opening a handle to lsass.exe with rights sufficient to read its
+    memory (PROCESS_VM_READ/PROCESS_QUERY_INFORMATION/PROCESS_DUP_HANDLE), the
+    Mimikatz/procdump-style access pattern for OS credential dumping. Modeled on
+    Fibratus's credential_access_suspicious_lsass_process_access rule.
+references:
+    - https://github.com/rabbitstack/fibratus/tree/master/rules
+logsource:
+    category: process_access
+    product: windows
+detection:
+    selection:
+        EventID: 10 # ProcessAccess (Sysmon)
+        TargetImage|endswith: '\lsass.exe'
+        GrantedAccess:
+            - '0x1FFFFF'
+            - '0x1010'
+            - '0x1410'
+            - '0x1438'
+    filter_trusted_paths:
+        SourceImage|startswith:
+            - 'C:\Windows\System32\'
+            - 'C:\Windows\SysWOW64\'
+    condition: selection and not filter_trusted_paths
+tags:
+    - attack.credential_access
+    - attack.t1003.001
+falsepositives:
+    - Endpoint security / AV products with a legitimate LSASS scanning driver
+    - Task Manager, Process Explorer, System Informer used interactively by an admin
+level: high
+---
+title: DLL Loaded Into High-Value Process From Staging Directory
+id: c7a1d9e0-45f1-4a1b-8b6e-1d9f0c3a5e77
+status: experimental
+description: >
+    Detects a DLL mapped into a system-critical process (svchost.exe, explorer.exe,
+    lsass.exe, services.exe, etc.) from a temp/public/programdata path, consistent
+    with DLL injection or side-loading rather than a normal installed dependency.
+    Correlates with module_inspector.py's active memory-map sweep.
+logsource:
+    category: image_load
+    product: windows
+detection:
+    selection:
+        EventID: 7 # ImageLoad (Sysmon)
+        Image|endswith:
+            - '\svchost.exe'
+            - '\explorer.exe'
+            - '\lsass.exe'
+            - '\spoolsv.exe'
+            - '\services.exe'
+            - '\winlogon.exe'
+        ImageLoaded|contains:
+            - '\AppData\Local\Temp\'
+            - '\Windows\Temp\'
+            - '\Users\Public\'
+            - '\ProgramData\'
+    condition: selection
+tags:
+    - attack.defense_evasion
+    - attack.t1055
+falsepositives:
+    - Some legitimate updaters/installers stage helper DLLs in ProgramData
+level: high
+---
+title: Windows Defender Tamper Attempt via Command Line
+id: d1f4a2b6-8c90-4e11-b2a3-6f9d0e5c7a10
+status: experimental
+description: >
+    Detects command lines that disable or reconfigure Windows Defender
+    (Set-MpPreference, sc/net stop WinDefend, killing MsMpEng.exe). Added
+    after a live host audit found Tamper Protection disabled - nothing in
+    Defender itself alerts when its own protections are turned off, so this
+    rule (mirrored in heuristic_engine.py's DEFENDER_TAMPER_PATTERNS) is the
+    independent compensating control.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        EventID: 1 # ProcessCreate (Sysmon)
+        CommandLine|contains:
+            - 'Set-MpPreference'
+            - 'DisableRealtimeMonitoring'
+            - 'DisableAntiSpyware'
+            - 'DisableBehaviorMonitoring'
+            - 'sc stop WinDefend'
+            - 'net stop WinDefend'
+            - 'taskkill /IM MsMpEng.exe'
+    condition: selection
+tags:
+    - attack.defense_evasion
+    - attack.t1562.001
+falsepositives:
+    - Legitimate Defender administration by IT/security staff
+level: critical
+---
+title: Office Application Spawned a Scripting/Shell LOLBin
+id: e29b6c14-3a5d-4f77-9e02-1c8b5d4a9e33
+status: experimental
+description: >
+    Detects Word/Excel/PowerPoint/Outlook spawning cmd, powershell, wscript,
+    mshta, rundll32, or regsvr32 - the classic macro-dropper execution
+    chain. This host has zero ASR rules configured, so the ASR rule that
+    would normally block this ("Block Office applications from creating
+    child processes") is not active; this Sigma rule + the matching
+    heuristic_engine.py check compensate for that gap.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        EventID: 1 # ProcessCreate (Sysmon)
+        ParentImage|endswith:
+            - '\WINWORD.EXE'
+            - '\EXCEL.EXE'
+            - '\POWERPNT.EXE'
+            - '\OUTLOOK.EXE'
+        Image|endswith:
+            - '\cmd.exe'
+            - '\powershell.exe'
+            - '\pwsh.exe'
+            - '\wscript.exe'
+            - '\cscript.exe'
+            - '\mshta.exe'
+            - '\rundll32.exe'
+            - '\regsvr32.exe'
+    condition: selection
+tags:
+    - attack.execution
+    - attack.t1204.002
+falsepositives:
+    - Legitimate mail-merge or automation macros that shell out intentionally
+level: high
+---
+title: Obfuscated or Download-Execute PowerShell Command Line
+id: f3a8d5e2-1b6c-49f0-a7d4-2e9c8f6b3a01
+status: experimental
+description: >
+    Detects PowerShell invoked with encoded/base64 commands, hidden window
+    style, execution-policy bypass, or in-memory download+execute cradles
+    (IEX/DownloadString). This host has PowerShell Script Block Logging
+    disabled, so this command-line-level check is the only current
+    visibility into obfuscated PowerShell short of enabling that policy.
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        EventID: 1 # ProcessCreate (Sysmon)
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'
+        CommandLine|contains:
+            - '-enc '
+            - '-EncodedCommand'
+            - 'FromBase64String'
+            - 'DownloadString'
+            - 'DownloadFile'
+            - 'IEX('
+            - '-WindowStyle Hidden'
+            - '-ExecutionPolicy Bypass'
+    condition: selection
+tags:
+    - attack.execution
+    - attack.defense_evasion
+    - attack.t1059.001
+falsepositives:
+    - Legitimate admin scripts that happen to use -EncodedCommand for special characters
+level: medium
+---
+title: Mass File Creation/Rename Burst (Potential Ransomware)
+id: a6c3e9f1-4d7b-4a02-8f19-9b3d6e2c1a45
+status: experimental
+description: >
+    Detects a single process creating/renaming a high volume of files in a
+    short window - consistent with mass file encryption. This host has
+    Controlled Folder Access disabled (no ransomware folder guarding at
+    all), so this rate-based heuristic (mirrored in heuristic_engine.py's
+    _handle_file_create) is the compensating control.
+logsource:
+    category: file_event
+    product: windows
+detection:
+    selection:
+        EventID: 11 # FileCreate (Sysmon)
+    timeframe: 15s
+    condition: selection | count(TargetFilename) by ProcessId > 40
+tags:
+    - attack.impact
+    - attack.t1486
+falsepositives:
+    - Bulk file operations (large archive extraction, sync clients, backup software)
+level: high

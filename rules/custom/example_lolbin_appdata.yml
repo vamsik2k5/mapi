@@ -1,0 +1,29 @@
+# Example custom rule (rules/custom/*.yml) - demonstrates the additive
+# declarative rule format from src/rule_engine.py. Copy this file to add
+# your own detections without touching heuristic_engine.py or
+# static_scanner.py.
+#
+# `match` is a constrained {field, op, value} tree under `all`/`any` -
+# never an eval'd expression - so a rule file can never execute code.
+# Every hit is scored through the engine's own _add_score(), which means
+# the protected-process floor and score decay apply to this rule exactly
+# as they do to every hardcoded one.
+
+id: custom_lolbin_from_appdata_roaming
+name: LOLBin executed from AppData Roaming
+description: >
+  A known living-off-the-land binary (often abused for proxy execution or
+  DLL side-loading) launched from a non-standard, user-writable directory.
+applies_to: process_create   # process_create | process_access | file_create | registry_event | static_pe
+technique: T1218
+score: 35
+match:
+  all:
+    - field: image
+      op: contains
+      value: "\\appdata\\roaming\\"
+    - field: image
+      op: contains
+      value: [rundll32.exe, regsvr32.exe, mshta.exe, wscript.exe, cscript.exe]
+message: "LOLBin '{image}' launched from AppData\\Roaming"
+enabled: true

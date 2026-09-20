@@ -1,0 +1,86 @@
+<!--
+  Sysmon config for mal_project's EDR prototype.
+
+  Scoped deliberately narrow: only the event types heuristic_engine.py and
+  rules/sigma.yml actually consume (ProcessCreate/1, ImageLoad/7,
+  ProcessAccess/10, FileCreate/11, RegistryEvent/13), with include-filters
+  on the noisy ones (10/11/7) so the pipeline stays usable on a normal dev
+  box instead of drowning in AV/debugger telemetry. Everything else is
+  switched off.
+-->
+<Sysmon schemaversion="4.90">
+  <EventFiltering>
+
+    <!-- EventID 1: ProcessCreate - consumed by _handle_process_create
+         (staging-dir exec, Defender tamper, PowerShell obfuscation,
+         Office->LOLBin). Cheap to log broadly. -->
+    <RuleGroup name="" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <!-- Cut the highest-volume, lowest-signal noise -->
+        <Image condition="end with">conhost.exe</Image>
+        <Image condition="end with">SearchProtocolHost.exe</Image>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- EventID 10: ProcessAccess - consumed by _handle_process_access
+         (LSASS credential access, svchost hollowing). Unfiltered this
+         event fires thousands of times/sec, so only log access to the
+         handful of processes our heuristics actually score. -->
+    <RuleGroup name="" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="end with">\lsass.exe</TargetImage>
+        <TargetImage condition="end with">\svchost.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- EventID 11: FileCreate - consumed by _handle_file_create
+         (ransomware burst detector). Excludes the highest-volume benign
+         churn (browser caches, Windows Update, this project's own venv)
+         so the rate counter isn't drowned by normal background I/O. -->
+    <RuleGroup name="" groupRelation="or">
+      <FileCreate onmatch="exclude">
+        <TargetFilename condition="contains">\AppData\Local\Microsoft\Windows\WebCache\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Temp\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Packages\</TargetFilename>
+        <TargetFilename condition="contains">\Windows\SoftwareDistribution\</TargetFilename>
+        <TargetFilename condition="contains">\mal_project\.venv\</TargetFilename>
+        <TargetFilename condition="end with">.tmp</TargetFilename>
+        <TargetFilename condition="end with">.log</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- EventID 13: RegistryEvent (value set) - consumed by
+         _handle_registry_event (Run-key persistence). -->
+    <RuleGroup name="" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\RunOnce</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- EventID 7: ImageLoad - backs the DLL-staging-path Sigma rule and
+         complements module_inspector.py's active sweep. Extremely noisy
+         unfiltered, so only log loads into the same high-value process
+         set module_inspector.py watches, or loads from staging paths. -->
+    <RuleGroup name="" groupRelation="or">
+      <ImageLoad onmatch="include">
+        <Image condition="end with">\svchost.exe</Image>
+        <Image condition="end with">\explorer.exe</Image>
+        <Image condition="end with">\lsass.exe</Image>
+        <Image condition="end with">\spoolsv.exe</Image>
+        <Image condition="end with">\services.exe</Image>
+        <Image condition="end with">\winlogon.exe</Image>
+        <ImageLoaded condition="contains">\AppData\Local\Temp\</ImageLoaded>
+        <ImageLoaded condition="contains">\Windows\Temp\</ImageLoaded>
+        <ImageLoaded condition="contains">\Users\Public\</ImageLoaded>
+        <ImageLoaded condition="contains">\ProgramData\</ImageLoaded>
+      </ImageLoad>
+    </RuleGroup>
+
+    <!-- Everything else Sysmon can emit (network connect, driver load,
+         pipe events, WMI, DNS query, clipboard, etc.) is intentionally
+         left off - the agent doesn't consume it yet, and logging it
+         would just add noise/overhead with no corresponding detection. -->
+
+  </EventFiltering>
+</Sysmon>

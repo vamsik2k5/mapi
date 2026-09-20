@@ -1,7 +1,25 @@
-# Ignore build files
-*.vc.db
-*.ipch
-# Visual Studio cache
-.vs/
-*.ipch
-*.vc.db
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Raw malware samples - never publish live malware to a public repo.
+# See reports/ for the analysis write-ups instead; regenerate
+# data/binaries.json locally with tools/extract_features.py if needed.
+samples/*.exe
+samples/*.zip
+samples/*.dll
+
+# Sysmon binaries - large, Microsoft-signed third-party redistributables,
+# easy to re-download (see README for the exact command). Config stays.
+tools/sysmon/*.exe
+tools/sysmon/Eula.txt
+
+# Editor/OS cruft
+.vscode/
+Thumbs.db
+
+# Never commit API keys/tokens
+.env
+*.key
+tools/.mb_auth_key

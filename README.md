@@ -340,7 +340,52 @@ checked (see above).
 telemetry from two sensors, the correlator, health/blind-state, and the log
 pipeline. It makes no claim about file, memory, network, or cloud-delivery
 failures because no sensor for those exists here, and it does not stop real
-services — that needs a disposable VM and is a deliberate follow-on.
+services — that needs a disposable VM, which is what the next section does.
+
+### Live evaluation in a VM (`vm_eval.py`)
+
+The lab above uses synthetic events. `vm_eval.py` is the real thing: run it
+inside a disposable VM next to a running `web_server.py`, and it launches
+harmless emulations of attacker techniques, then reads the agent's own
+`/api/alerts` and `/api/summary` to score what it noticed.
+
+```powershell
+python vm_eval.py --list                     # scenarios, no side effects
+python vm_eval.py --vm                       # attacks + benign corpus (elevated shell)
+python vm_eval.py --vm --sensor-kill         # also stop/restart the Sysmon service
+python vm_eval.py --vm --json ..\reports\vm_eval.json
+```
+
+Per scenario it reports detected/missed, time to alert, peak score and
+whether the agent auto-mitigated. Nothing is downloaded, disabled, injected
+or encrypted: the Defender-tamper command is only printed, the download
+cradle targets a refused loopback port, the LSASS test opens and closes a
+handle without reading, the shadow-copy delete uses a nil GUID, and the
+Run key, scheduled task, service and files are removed afterwards.
+
+- **Rule-backed scenarios** (encoded PowerShell, download cradle, Office
+  parent, staging-directory exec, Defender tamper, Run key, LSASS handle,
+  ransomware-style burst) must be detected; a miss fails the run.
+- **Gap scenarios** (scheduled task, service creation, shadow-copy delete,
+  certutil) have no rule today. They are reported as `NO RULE` — a coverage
+  map, not a failure — and flip to `DETECTED*` if a rule is added later.
+- **Benign corpus**: ordinary commands, several containing text that older
+  rules false-positived on (`grep -E`, `sed -e`, `Set-MpPreference`). Any
+  alert or mitigation is a `FALSE POSITIVE` and fails the run.
+- **`--sensor-kill`**: stops Sysmon while ETW keeps delivering, and checks
+  the sensor goes stale, `blind_state` becomes `DEGRADED`, the caveat is
+  raised, the watchdog logs it, and everything recovers to `HEALTHY` after
+  the service restarts. The service is always restarted, even on failure.
+
+It refuses to run without `--vm` and without elevation, and refuses to start
+unless both sensors are live (an idle VM starts so few processes that a
+healthy ETW sensor can look stale; the harness warms it up first).
+`test_vm_eval.py` checks every launcher against the real engine rules
+without starting any scenario process, so a rule change that silently breaks
+a scenario fails the test suite.
+
+Not covered, on purpose: process injection, parent-PID spoofing and log
+clearing (no safe emulation that proves a distinct signal).
 
 ## What each detector actually catches
 
@@ -795,6 +840,7 @@ mal_project/
 │   ├── sensor_health.py     Per-sensor heartbeat tracking + observe-only staleness watchdog + aggregate blind-state
 │   ├── self_test.py         Periodic benign self-test - proves the telemetry/alert pipeline actually delivers, not just that a thread is alive
 │   ├── failure_lab.py       Software-only failure-injection lab - breaks the telemetry pipeline on purpose and verifies detection/fallback/recovery
+│   ├── vm_eval.py           Live VM evaluation: harmless technique emulations + benign corpus scored against the running agent's API
 │   ├── module_inspector.py Active live-process module sweep
 │   ├── rule_engine.py       Additive YAML rule pack (rules/custom/*.yml) - see Custom detection rules
 │   ├── detection_config.py  Config-driven tunables (config/detection.yml) - decay/thresholds/ransomware window
